@@ -1,0 +1,12 @@
+# Chess Game Analyzer - Python Dependencies
+
+# Core chess library (required)
+python-chess>=1.9.0
+
+# Plotting (optional - for matplotlib plots)
+matplotlib>=3.5.0
+
+# Note: Stockfish must be installed separately
+# Ubuntu/Debian: sudo apt install stockfish
+# macOS: brew install stockfish
+# Windows: https://stockfishchess.org/download/
