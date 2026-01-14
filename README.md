@@ -1,23 +1,17 @@
 # Chess Game Analyzer
 
-A Python toolkit for analyzing chess games with detailed positional evaluation metrics and generating professional LaTeX reports with plots.
+A Python tool for deep analysis of chess games, generating professional LaTeX reports with positional metrics, evaluation graphs, and game character classification.
 
 ## Features
 
-- **Move-by-move analysis** using Stockfish for centipawn evaluation
-- **Positional metrics** computed directly from board position:
-  - **Space**: Control of central territory
-  - **Mobility**: Safe squares available to pieces
-  - **King Safety**: Pawn shield strength and king zone pressure
-  - **Threats**: Tactical tension including hanging pieces, attacks, and weak squares
-- **LaTeX report generation** with:
-  - Game metadata and player statistics
-  - Annotated game score with NAG symbols
-  - Critical position diagrams with `chessboard` package
-  - Move-by-move plots (matplotlib PDF or ASCII)
-  - Methodology explanations
-- **Brilliant sacrifice detection**
-- **Accuracy scoring** similar to chess.com/lichess
+- **Stockfish Integration**: Move-by-move centipawn evaluation with configurable depth
+- **Positional Metrics**: Space control, piece mobility, king safety, and threats computed directly from board position
+- **Game Character Classification**: Automatic categorization of games as balanced, tense, tactical, or chaotic
+- **Brilliant Sacrifice Detection**: Identifies and highlights spectacular sacrifices
+- **Critical Position Identification**: Marks turning points and biggest evaluation swings
+- **LaTeX Report Generation**: Publication-ready reports with chess diagrams and plots
+- **Multi-Game Book Support**: Analyze entire PGN databases and generate book-format documents
+- **Visualization**: Matplotlib plots and ASCII graphs showing how metrics evolve
 
 ## Installation
 
@@ -29,138 +23,206 @@ A Python toolkit for analyzing chess games with detailed positional evaluation m
 ### Python Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install python-chess matplotlib
 ```
 
-### Stockfish
+### Installing Stockfish
 
-Install Stockfish for your platform:
-
+**Ubuntu/Debian:**
 ```bash
-# Ubuntu/Debian
 sudo apt install stockfish
-
-# macOS
-brew install stockfish
-
-# Windows: Download from https://stockfishchess.org/download/
 ```
+
+**macOS:**
+```bash
+brew install stockfish
+```
+
+**Windows:**
+Download from [stockfishchess.org](https://stockfishchess.org/download/)
+
+### LaTeX Requirements (for PDF generation)
+
+The generated `.tex` files require:
+- `xskak` and `chessboard` packages for chess diagrams
+- `pgfplots` for evaluation graphs
+- Standard packages: `booktabs`, `longtable`, `hyperref`, `xcolor`, `graphicx`
 
 ## Quick Start
-
-### Python API
-
-```python
-from chess_game_analyzer import analyze_game_with_positional_metrics
-
-# Analyze a game and generate a LaTeX report
-result = analyze_game_with_positional_metrics(
-    pgn_source="game.pgn",
-    output_path="analysis.tex",
-    include_plots=True,
-    include_ascii_plots=False,
-    plot_output_dir="./plots/"
-)
-
-# Access move-by-move data
-for move in result.moves:
-    pos = move.positional_eval
-    print(f"Move {move.ply}: Space W={pos.space_white:.2f} B={pos.space_black:.2f}")
-    print(f"         Threats W={pos.threats_white:.2f} B={pos.threats_black:.2f}")
-```
 
 ### Command Line
 
 ```bash
-# Basic analysis with plots
-python chess_game_analyzer.py game.pgn -o analysis.tex
+# Analyze a single game
+python chess_game_analyzer6f.py game.pgn -o analysis.tex
 
-# With ASCII plots (no matplotlib required)
-python chess_game_analyzer.py game.pgn -o analysis.tex --ascii-plots --no-plots
+# Analyze multiple games as a book
+python chess_game_analyzer6f.py games.pgn -o book.tex --book --book-title "My Games"
 
-# Custom Stockfish path and depth
-python chess_game_analyzer.py game.pgn -o analysis.tex -s /path/to/stockfish -d 25
+# Export raw data as JSON
+python chess_game_analyzer6f.py game.pgn --json-output analysis.json
+```
 
-# JSON output for further processing
-python chess_game_analyzer.py game.pgn --json-output analysis.json
+### Python API
+
+```python
+from chess_game_analyzer6f import (
+    analyze_game_with_positional_metrics,
+    classify_game_character
+)
+
+# Analyze a game
+result = analyze_game_with_positional_metrics(
+    pgn_source="game.pgn",
+    output_path="analysis.tex",
+    include_plots=True,
+    plot_output_dir="./plots/"
+)
+
+# Access results
+print(f"White accuracy: {result.white_stats['accuracy']:.1f}%")
+print(f"Black accuracy: {result.black_stats['accuracy']:.1f}%")
+
+# Game character classification
+gc = result.game_character
+print(f"Game type: {gc['spread_class']} ({gc['direction_class']})")
+print(f"Evaluation range: {gc['m1']:+.2f} to {gc['m2']:+.2f}")
 ```
 
 ## Positional Metrics
 
 ### Space
-Counts squares in the center (files c-f, ranks 2-4 for White, 5-7 for Black) that are:
-1. Attacked by at least one friendly pawn
-2. Not occupied by any enemy piece
+Measures control of central territory (files c-f), weighted by:
+- Squares attacked by friendly pawns
+- Pieces positioned to exploit the space
+- Scaled by total piece count (more relevant in closed positions)
 
 ### Mobility
-Counts safe squares available to each piece, excluding squares defended by enemy pawns. Weighted by piece type with bonuses for activity in enemy territory.
+Counts safe squares available to each piece type:
+- **Knights**: Squares not attacked by enemy pawns
+- **Bishops**: Diagonal squares with bonus for long diagonals
+- **Rooks**: File/rank squares with bonus for open files and 7th rank
+- **Queens**: Combined bishop and rook mobility
 
 ### King Safety
-Evaluates:
-- Pawn shield strength (pawns protecting the castled king)
-- Enemy attacks on squares near the king
+Evaluates defensive structure:
+- Pawn shield strength
+- Enemy piece proximity (king tropism)
+- Attack units near the king
+- Available safe checks for opponent
 
 ### Threats
-Tactical tension computed directly from board position:
-- **Hanging pieces**: Attacked but undefended pieces (weighted by piece value × 2)
-- **Attacked by lower-value piece**: e.g., queen attacked by knight
-- **King zone pressure**: Enemy attacks on squares near the king
-- **Safe checks**: Available checking moves from safe squares
-- **Weak squares (holes)**: Squares that cannot be defended by pawns
-- **Check availability**: Legal moves that give check
+Tactical tension assessment:
+- Hanging pieces (attacked but undefended)
+- Pieces attacked by lower-value pieces
+- King zone pressure
+- Weak squares in pawn structure
 
-## Output
+## Game Character Classification
 
-### LaTeX Report Structure
+Games are automatically classified based on evaluation volatility:
 
-1. **Game Information**: Event, players, date, opening
-2. **Player Statistics**: Accuracy, move classifications, average positional metrics
-3. **Positional Analysis**: Plots showing evaluation, space, mobility, king safety, and threats over time
-4. **Methodology**: Explanation of how metrics are computed
-5. **Brilliant Sacrifices**: Detected material sacrifices that maintain evaluation
-6. **Annotated Game**: Full game score with annotations
-7. **Critical Positions**: Diagrams of key moments with positional breakdowns
+| Spread (d) | Classification | Description |
+|------------|----------------|-------------|
+| d < 1 | **Balanced** | Minimal advantage shifts; controlled play |
+| 1 ≤ d < 3 | **Tense** | Normal competitive tension |
+| 3 ≤ d < 6 | **Tactical** | Significant swings; complications |
+| d ≥ 6 | **Chaotic** | Wild swings; likely blunders |
 
-### Compiling LaTeX
+Where:
+- `m₂` = maximum evaluation for White
+- `m₁` = minimum evaluation for White  
+- `d = m₂ - m₁` (the spread)
 
-The generated `.tex` file requires these LaTeX packages:
-- `xskak`, `chessboard` (chess diagrams)
-- `pgfplots`, `graphicx` (plots)
-- `booktabs`, `longtable` (tables)
-- `hyperref`, `xcolor` (formatting)
+### Directionality
 
-```bash
-pdflatex analysis.tex
+- **One-sided**: `m₁ > -0.5` or `m₂ < 0.5` (one side dominated)
+- **Seesaw**: `m₁ < -1` and `m₂ > 1` (advantage changed hands)
+
+## Command Line Options
+
+```
+usage: chess_game_analyzer6f.py [-h] [-o OUTPUT] [--json-output JSON_OUTPUT]
+                                 [-s STOCKFISH] [-d DEPTH] [-t TIME]
+                                 [--no-diagrams] [--no-methodology] [--no-plots]
+                                 [--ascii-plots] [--plot-dir PLOT_DIR]
+                                 [--book] [--book-title BOOK_TITLE]
+                                 [--book-author BOOK_AUTHOR] [-q]
+                                 pgn_file
+
+Arguments:
+  pgn_file              Path to PGN file (can contain multiple games)
+
+Options:
+  -o, --output          Output LaTeX file
+  --json-output         Output raw analysis as JSON
+  -s, --stockfish       Path to Stockfish executable (default: /usr/games/stockfish)
+  -d, --depth           Analysis depth (default: 20)
+  -t, --time            Time per position in seconds (default: 1.0)
+  --no-diagrams         Don't include position diagrams
+  --no-methodology      Don't include methodology explanation
+  --no-plots            Don't include matplotlib plots
+  --ascii-plots         Include ASCII plots in verbatim environment
+  --plot-dir            Directory for plot output files
+  --book                Analyze all games and generate a book
+  --book-title          Title for the book
+  --book-author         Author for the book
+  -q, --quiet           Suppress progress messages
 ```
 
-## Module Structure
+## Output Examples
 
-- `chess_game_analyzer.py`: Main analysis engine and LaTeX generator
-- `chess_plotting.py`: Matplotlib and ASCII plot generation
+### Single Game Report
+Generates an `article`-class LaTeX document with:
+- Game information header
+- Player statistics (accuracy, move classifications)
+- Positional analysis with plots
+- Game character classification
+- Brilliant sacrifices (if any)
+- Annotated game score
+- Critical positions with diagrams
+- Methodology appendix
 
-## Configuration Options
+### Multi-Game Book
+Generates a `book`-class LaTeX document with:
+- Table of contents
+- Each game as a chapter
+- Shared methodology appendix
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `stockfish_path` | `/usr/games/stockfish` | Path to Stockfish executable |
-| `depth` | 20 | Analysis depth (higher = slower but more accurate) |
-| `time_limit` | 1.0 | Seconds per position |
-| `include_diagrams` | True | Include chess board diagrams |
-| `include_plots` | True | Generate matplotlib plots |
-| `include_ascii_plots` | False | Include ASCII plots in verbatim |
-| `include_methodology` | True | Include methodology section |
-| `top_n_swings` | 2 | Number of "biggest swing" positions to highlight |
+## Data Classes
+
+### `EnhancedGameAnalysisResult`
+Complete analysis result containing:
+- Game metadata (players, event, date, opening)
+- List of `EnhancedMoveAnalysis` objects
+- Player statistics
+- `game_character` classification
+- `positional_summary` aggregates
+- Brilliant sacrifices and critical positions
+
+### `EnhancedMoveAnalysis`
+Per-move data:
+- Evaluation before/after
+- Best move and PV line
+- Classification (best, excellent, good, inaccuracy, mistake, blunder)
+- `PositionalEvaluation` breakdown
+
+### `PositionalEvaluation`
+Detailed positional metrics:
+- Space (white/black)
+- Mobility (middlegame/endgame weights)
+- King safety
+- Threats
+- Pawn structure details
 
 ## License
 
-MIT License - see [LICENSE.txt](LICENSE.txt)
+Modified BSD or MIT License (user's choice)
 
 ## Author
 
-David Joyner
+Generated for David Joyner's chess analysis pipeline, 2026
 
-## Acknowledgments
+## Contributing
 
-- [python-chess](https://python-chess.readthedocs.io/) for chess logic
-- [Stockfish](https://stockfishchess.org/) for position evaluation
-- Claude (Anthropic) for development assistance
+Contributions welcome! Please ensure any changes maintain compatibility with the LaTeX output format and include appropriate tests.
