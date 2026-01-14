@@ -61,10 +61,12 @@ Evaluates tactical tension (computed directly from board position):
 - Available checking moves for the side to move
 
 Usage:
-    from chess_game_analyzer import (
+    from chess_game_analyzer6e import (
         analyze_game_with_positional_metrics,
         PositionalEvaluation,
-        EnhancedMoveAnalysis
+        EnhancedMoveAnalysis,
+        analyze_games_to_book,
+        classify_game_character
     )
     
     # Get analysis with full positional breakdown and plots
@@ -81,11 +83,17 @@ Usage:
         pos = move.positional_eval
         print(f"Move {move.ply}: Space W={pos.space_white:.2f} B={pos.space_black:.2f}")
         print(f"         Mobility W={pos.mobility_white:.2f} B={pos.mobility_black:.2f}")
+    
+    # Access game character classification
+    gc = result.game_character
+    print(f"Game character: {gc['spread_class']} ({gc['direction_class']})")
+    print(f"  m1={gc['m1']:.2f}, m2={gc['m2']:.2f}, spread={gc['spread']:.2f}")
 
-    >>> from chess_game_analyzer import (
+    >>> from chess_game_analyzer6e import (
     ...         analyze_game_with_positional_metrics,
     ...         PositionalEvaluation,
-    ...         EnhancedMoveAnalysis
+    ...         EnhancedMoveAnalysis,
+    ...         analyze_games_to_book
     ...     )
     >>> game_pgn = "../wdj-games/Joyner-vs-Goodson_2023-05-16.pgn"
     >>> report_output = "../wdj-games/Joyner-vs-Goodson_2023-05-16-analysis.tex"
@@ -129,6 +137,101 @@ PIECE_VALUES = {
     chess.QUEEN: 900,
     chess.KING: 0
 }
+
+
+# =============================================================================
+# GAME CHARACTER CLASSIFICATION
+# =============================================================================
+
+def classify_game_character(moves: List) -> Dict[str, any]:
+    """
+    Classify the overall character of a game based on evaluation swings.
+    
+    Let m2 = maximum evaluation for White (in pawns)
+    Let m1 = minimum evaluation for White (in pawns)
+    Let d = m2 - m1 (the evaluation spread)
+    
+    Spread classifications:
+    - balanced: d < 1 (minimal advantage shifts)
+    - tense: 1 <= d < 3 (normal competitive tension)
+    - tactical: 3 <= d < 6 (significant swings, tactical complications)
+    - chaotic: d >= 6 (wild swings, likely blunders or speculative play)
+    
+    Directionality classifications:
+    - one-sided: m1 > -0.5 OR m2 < 0.5 (advantage never truly changed hands)
+    - seesaw: m1 < -1 AND m2 > 1 (advantage genuinely swung both ways)
+    
+    Args:
+        moves: List of EnhancedMoveAnalysis objects
+        
+    Returns:
+        Dictionary with:
+        - m1: minimum evaluation (pawns)
+        - m2: maximum evaluation (pawns)
+        - spread: m2 - m1
+        - spread_class: 'balanced', 'tense', 'tactical', or 'chaotic'
+        - direction_class: 'one-sided', 'seesaw', or 'normal'
+        - combined_description: human-readable summary
+    """
+    if not moves:
+        return {
+            'm1': 0.0, 'm2': 0.0, 'spread': 0.0,
+            'spread_class': 'balanced',
+            'direction_class': 'normal',
+            'combined_description': 'No moves to analyze'
+        }
+    
+    # Extract evaluations in pawns (eval_after is in centipawns)
+    evals = []
+    for m in moves:
+        # Cap extreme evaluations (mate scores) at ±15 pawns for classification
+        eval_pawns = m.eval_after / 100.0
+        if abs(eval_pawns) > 15:
+            eval_pawns = 15.0 if eval_pawns > 0 else -15.0
+        evals.append(eval_pawns)
+    
+    m1 = min(evals)  # minimum (most favorable for Black)
+    m2 = max(evals)  # maximum (most favorable for White)
+    d = m2 - m1      # spread
+    
+    # Spread classification
+    if d < 1:
+        spread_class = 'balanced'
+    elif d < 3:
+        spread_class = 'tense'
+    elif d < 6:
+        spread_class = 'tactical'
+    else:
+        spread_class = 'chaotic'
+    
+    # Directionality classification
+    if m1 > -0.5 or m2 < 0.5:
+        direction_class = 'one-sided'
+    elif m1 < -1 and m2 > 1:
+        direction_class = 'seesaw'
+    else:
+        direction_class = 'normal'
+    
+    # Generate combined description
+    if direction_class == 'one-sided':
+        if m1 > -0.5:
+            side_desc = "White maintained the advantage throughout"
+        else:
+            side_desc = "Black maintained the advantage throughout"
+        combined = f"A {spread_class}, one-sided game. {side_desc}."
+    elif direction_class == 'seesaw':
+        combined = f"A {spread_class} seesaw battle with the advantage changing hands."
+    else:
+        combined = f"A {spread_class} game with moderate swings."
+    
+    return {
+        'm1': m1,
+        'm2': m2,
+        'spread': d,
+        'spread_class': spread_class,
+        'direction_class': direction_class,
+        'combined_description': combined
+    }
 
 
 # =============================================================================
@@ -356,6 +459,9 @@ class EnhancedGameAnalysisResult:
     
     # Positional summaries
     positional_summary: Dict = field(default_factory=dict)
+    
+    # Game character classification
+    game_character: Dict = field(default_factory=dict)
     
     # Metadata
     analysis_depth: int = 20
@@ -1022,6 +1128,7 @@ class EnhancedGameAnalyzer:
                 white_stats=self._calculate_player_stats(white_moves),
                 black_stats=self._calculate_player_stats(black_moves),
                 positional_summary=self._compute_positional_summary(moves_analysis),
+                game_character=classify_game_character(moves_analysis),
                 analysis_depth=self.depth,
                 analysis_time=time.time() - start_time,
                 engine_version=self.engine_version
@@ -1030,6 +1137,71 @@ class EnhancedGameAnalyzer:
         finally:
             if isinstance(pgn_source, str) and not ('\n' in pgn_source or pgn_source.startswith('[')):
                 pgn_io.close()
+
+    def analyze_all_games(self, pgn_source: Union[str, io.StringIO],
+                          min_diagram_spacing: int = 6,
+                          top_n_swings: int = 2,
+                          verbose: bool = True) -> List[EnhancedGameAnalysisResult]:
+        """
+        Analyze all games in a PGN file.
+        
+        Args:
+            pgn_source: PGN file path, PGN string, or StringIO object
+            min_diagram_spacing: Minimum ply distance between critical position diagrams
+            top_n_swings: Number of "biggest swing" positions to always include
+            verbose: Print progress messages
+            
+        Returns:
+            List of EnhancedGameAnalysisResult objects, one per game
+        """
+        results = []
+        
+        # Open PGN source
+        if isinstance(pgn_source, str):
+            if '\n' in pgn_source or pgn_source.startswith('['):
+                pgn_io = io.StringIO(pgn_source)
+            else:
+                pgn_io = open(pgn_source, 'r')
+        else:
+            pgn_io = pgn_source
+        
+        try:
+            game_num = 0
+            while True:
+                game = chess.pgn.read_game(pgn_io)
+                if game is None:
+                    break
+                
+                game_num += 1
+                if verbose:
+                    white = game.headers.get("White", "Unknown")
+                    black = game.headers.get("Black", "Unknown")
+                    print(f"Analyzing game {game_num}: {white} vs {black}...")
+                
+                # Analyze this game using a StringIO of the game
+                game_pgn = io.StringIO()
+                exporter = chess.pgn.StringExporter()
+                game_pgn.write(game.accept(exporter))
+                game_pgn.seek(0)
+                
+                result = self.analyze_game(
+                    game_pgn,
+                    min_diagram_spacing=min_diagram_spacing,
+                    top_n_swings=top_n_swings
+                )
+                results.append(result)
+                
+                if verbose:
+                    print(f"  Completed in {result.analysis_time:.1f}s")
+            
+            if verbose:
+                print(f"Analyzed {len(results)} game(s) total.")
+                
+        finally:
+            if isinstance(pgn_source, str) and not ('\n' in pgn_source or pgn_source.startswith('[')):
+                pgn_io.close()
+        
+        return results
 
     def _calculate_material(self, board: chess.Board) -> int:
         """Calculates the material balance (positive = White ahead)."""
@@ -1522,6 +1694,26 @@ class EnhancedLaTeXReportGenerator:
             r"",
         ])
         
+        # Add game character classification if available
+        gc = analysis.game_character
+        if gc:
+            m1 = gc.get('m1', 0)
+            m2 = gc.get('m2', 0)
+            spread = gc.get('spread', 0)
+            spread_class = gc.get('spread_class', 'unknown')
+            direction_class = gc.get('direction_class', 'normal')
+            description = gc.get('combined_description', '')
+            
+            lines.extend([
+                r"\paragraph{Game Character Classification.}",
+                rf"Evaluation range: minimum $m_1 = {m1:+.2f}$, maximum $m_2 = {m2:+.2f}$, "
+                rf"spread $d = m_2 - m_1 = {spread:.2f}$.",
+                r"",
+                rf"This game is classified as \textbf{{{spread_class}}} "
+                rf"({direction_class}). {description}",
+                r"",
+            ])
+        
         if 'eval' in plot_files:
             lines.extend([
                 r"\begin{center}",
@@ -1748,7 +1940,544 @@ class EnhancedLaTeXReportGenerator:
             r"EG values become more important. For example, space matters greatly in the middlegame but is "
             r"nearly irrelevant in endgames.",
             r"",
+            r"\subsection{Game Character Classification}",
+            r"",
+            r"Games are classified based on evaluation volatility and directionality. Let $m_2$ be the maximum "
+            r"evaluation for White during the game (in pawns) and $m_1$ be the minimum. The \emph{spread} "
+            r"$d = m_2 - m_1$ measures the total evaluation range.",
+            r"",
+            r"\paragraph{Spread Classifications.} Based on the magnitude of $d$:",
+            r"\begin{itemize}",
+            r"\item \textbf{Balanced} ($d < 1$): Minimal advantage shifts; controlled, technical play with "
+            r"neither side gaining a significant edge.",
+            r"\item \textbf{Tense} ($1 \le d < 3$): Normal competitive tension; typical of well-played games "
+            r"where small advantages are contested.",
+            r"\item \textbf{Tactical} ($3 \le d < 6$): Significant evaluation swings; tactical complications, "
+            r"missed opportunities, or speculative play.",
+            r"\item \textbf{Chaotic} ($d \ge 6$): Wild swings in evaluation; likely includes major blunders, "
+            r"speculative sacrifices, or complex tactical melees.",
+            r"\end{itemize}",
+            r"",
+            r"\paragraph{Directionality Classifications.} Based on whether the advantage changed hands:",
+            r"\begin{itemize}",
+            r"\item \textbf{One-sided}: Either $m_1 > -\frac{1}{2}$ (White always comfortable) or "
+            r"$m_2 < \frac{1}{2}$ (Black always comfortable). The leading side maintained control throughout.",
+            r"\item \textbf{Seesaw}: Both $m_1 < -1$ and $m_2 > 1$. The advantage genuinely changed hands, "
+            r"with each side holding a significant advantage at some point.",
+            r"\item \textbf{Normal}: Neither one-sided nor seesaw; moderate swings without complete reversals.",
+            r"\end{itemize}",
+            r"",
+            r"These classifications combine to describe the overall game character. For example, a "
+            r'``tactical seesaw battle" indicates significant evaluation swings ($3 \le d < 6$) with the '
+            r"advantage changing hands multiple times.",
+            r"",
         ]
+
+    @staticmethod
+    def generate_book_report(analyses: List[EnhancedGameAnalysisResult],
+                             book_title: str = "Chess Game Collection Analysis",
+                             author: str = None,
+                             include_diagrams: bool = True,
+                             include_positional: bool = True,
+                             include_methodology: bool = True,
+                             include_plots: bool = True,
+                             include_ascii_plots: bool = False,
+                             plot_output_dir: str = None) -> str:
+        """
+        Generate a LaTeX book with multiple games as chapters.
+        
+        Args:
+            analyses: List of EnhancedGameAnalysisResult objects
+            book_title: Title for the book
+            author: Author name (defaults to engine version)
+            include_diagrams: Include chess board diagrams
+            include_positional: Include positional evaluation sections
+            include_methodology: Include methodology explanation (once, as appendix)
+            include_plots: Include matplotlib plots (requires matplotlib)
+            include_ascii_plots: Include ASCII plots in verbatim environment
+            plot_output_dir: Directory to save plot files (defaults to current dir)
+            
+        Returns:
+            Complete LaTeX book document as string
+        """
+        if not analyses:
+            raise ValueError("No games to include in report")
+        
+        esc = EnhancedLaTeXReportGenerator._escape_latex
+        lines = []
+        
+        # Set plot output directory
+        if plot_output_dir is None:
+            plot_output_dir = "."
+        
+        # Determine author
+        if author is None:
+            author = f"Generated by {analyses[0].engine_version}"
+        
+        # Document preamble - using book class
+        lines.extend([
+            r"\documentclass[11pt]{book}",
+            r"\usepackage[utf8]{inputenc}",
+            r"\usepackage{xskak}",
+            r"\usepackage{amssymb}",
+            r"\usepackage{chessboard}",
+            r"\usepackage[margin=1in]{geometry}",
+            r"\usepackage{longtable}",
+            r"\usepackage{booktabs}",
+            r"\usepackage{hyperref}",
+            r"\usepackage{xcolor}",
+            r"\usepackage{pgfplots}",
+            r"\usepackage{graphicx}",
+            r"\pgfplotsset{compat=1.16}",
+            r"",
+            r"% Custom colors",
+            r"\definecolor{brilliantcolor}{RGB}{0, 150, 150}",
+            r"\definecolor{excellentcolor}{RGB}{0, 128, 0}",
+            r"\definecolor{goodcolor}{RGB}{64, 160, 64}",
+            r"\definecolor{inaccuracycolor}{RGB}{200, 180, 0}",
+            r"\definecolor{mistakecolor}{RGB}{220, 120, 0}",
+            r"\definecolor{blundercolor}{RGB}{200, 0, 0}",
+            r"\definecolor{spacecolor}{RGB}{70, 130, 180}",
+            r"\definecolor{mobilitycolor}{RGB}{60, 179, 113}",
+            r"",
+            rf"\title{{{esc(book_title)}}}",
+            rf"\author{{{esc(author)}}}",
+            r"\date{\today}",
+            r"",
+            r"\begin{document}",
+            r"\maketitle",
+            r"\tableofcontents",
+            r"",
+        ])
+        
+        # Generate each game as a chapter
+        for game_num, analysis in enumerate(analyses, 1):
+            lines.extend(EnhancedLaTeXReportGenerator._generate_game_chapter(
+                analysis,
+                game_num=game_num,
+                include_diagrams=include_diagrams,
+                include_positional=include_positional,
+                include_plots=include_plots,
+                include_ascii_plots=include_ascii_plots,
+                plot_output_dir=plot_output_dir
+            ))
+        
+        # Add methodology as appendix (once for all games)
+        if include_methodology:
+            lines.extend([
+                r"\appendix",
+                r"\chapter{Methodology: How Metrics Are Computed}",
+                r"",
+                r"This appendix explains how the positional metrics are computed.",
+                r"",
+            ])
+            # Reuse methodology content but convert sections to sections (not subsections)
+            methodology = EnhancedLaTeXReportGenerator._generate_methodology_section()
+            for line in methodology:
+                # Skip the original \section line
+                if line.startswith(r"\section{Methodology"):
+                    continue
+                # Convert \subsection to \section for appendix
+                if line.startswith(r"\subsection{"):
+                    line = line.replace(r"\subsection{", r"\section{")
+                lines.append(line)
+        
+        lines.extend([
+            r"\end{document}",
+        ])
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def _generate_game_chapter(analysis: EnhancedGameAnalysisResult,
+                               game_num: int,
+                               include_diagrams: bool = True,
+                               include_positional: bool = True,
+                               include_plots: bool = True,
+                               include_ascii_plots: bool = False,
+                               plot_output_dir: str = ".") -> List[str]:
+        """Generate a chapter for a single game in the book."""
+        esc = EnhancedLaTeXReportGenerator._escape_latex
+        lines = []
+        
+        # Chapter title
+        chapter_title = f"{esc(analysis.white)} vs {esc(analysis.black)}"
+        lines.extend([
+            rf"\chapter{{{chapter_title}}}",
+            r"",
+        ])
+        
+        # Game Information as section
+        lines.extend([
+            r"\section{Game Information}",
+            r"\begin{tabular}{ll}",
+            rf"\textbf{{Event}} & {esc(analysis.event)} \\",
+            rf"\textbf{{Site}} & {esc(analysis.site)} \\",
+            rf"\textbf{{Date}} & {esc(analysis.date)} \\",
+            rf"\textbf{{Round}} & {esc(analysis.round_num)} \\",
+        ])
+        
+        white_info = esc(analysis.white)
+        if analysis.white_elo:
+            white_info += f" ({analysis.white_elo})"
+        black_info = esc(analysis.black)
+        if analysis.black_elo:
+            black_info += f" ({analysis.black_elo})"
+        
+        lines.extend([
+            rf"\textbf{{White}} & {white_info} \\",
+            rf"\textbf{{Black}} & {black_info} \\",
+            rf"\textbf{{Result}} & {esc(analysis.result)} \\",
+            rf"\textbf{{Opening}} & {esc(analysis.opening_eco)} -- {esc(analysis.opening_name)} \\",
+            r"\end{tabular}",
+            r"",
+        ])
+        
+        # Player Statistics
+        lines.extend([
+            r"\section{Player Statistics}",
+            r"",
+            r"\subsection{" + esc(analysis.white) + " (White)}",
+            r"\begin{itemize}",
+            rf"\item Total moves: {analysis.white_stats['total_moves']}",
+            rf"\item Accuracy: {analysis.white_stats['accuracy']:.1f}\%",
+            rf"\item Average centipawn loss: {analysis.white_stats['avg_centipawn_loss']:.1f}",
+            rf"\item Best/Excellent moves: {analysis.white_stats['best_moves']} / {analysis.white_stats['excellent_moves']}",
+            rf"\item Good moves: {analysis.white_stats['good_moves']}",
+            rf"\item Inaccuracies: {analysis.white_stats['inaccuracies']}",
+            rf"\item Mistakes: {analysis.white_stats['mistakes']}",
+            rf"\item Blunders: {analysis.white_stats['blunders']}",
+            r"\end{itemize}",
+            r"",
+            r"\subsection{" + esc(analysis.black) + " (Black)}",
+            r"\begin{itemize}",
+            rf"\item Total moves: {analysis.black_stats['total_moves']}",
+            rf"\item Accuracy: {analysis.black_stats['accuracy']:.1f}\%",
+            rf"\item Average centipawn loss: {analysis.black_stats['avg_centipawn_loss']:.1f}",
+            rf"\item Best/Excellent moves: {analysis.black_stats['best_moves']} / {analysis.black_stats['excellent_moves']}",
+            rf"\item Good moves: {analysis.black_stats['good_moves']}",
+            rf"\item Inaccuracies: {analysis.black_stats['inaccuracies']}",
+            rf"\item Mistakes: {analysis.black_stats['mistakes']}",
+            rf"\item Blunders: {analysis.black_stats['blunders']}",
+            r"\end{itemize}",
+            r"",
+        ])
+        
+        # Positional Analysis Section with Plots (use game_num for unique plot filenames)
+        if include_positional and analysis.positional_summary:
+            lines.extend(EnhancedLaTeXReportGenerator._generate_positional_section_for_book(
+                analysis,
+                game_num=game_num,
+                include_plots=include_plots,
+                include_ascii_plots=include_ascii_plots,
+                plot_output_dir=plot_output_dir
+            ))
+        
+        # Brilliant Sacrifices
+        if analysis.brilliant_sacrifices:
+            lines.extend([
+                r"\section{Brilliant Sacrifices}",
+                r"",
+                rf"This game features {len(analysis.brilliant_sacrifices)} brilliant sacrifice(s):",
+                r"",
+                r"\begin{itemize}",
+            ])
+            
+            for sac in analysis.brilliant_sacrifices:
+                move_num = (sac.ply + 1) // 2
+                move_str = f"{move_num}. {sac.move_san}" if sac.player == "White" else f"{move_num}...{sac.move_san}"
+                sound_str = "Sound sacrifice" if sac.is_sound else "Speculative sacrifice"
+                
+                lines.append(
+                    rf"\item \textbf{{{esc(move_str)}}} -- {sac.player} sacrifices {sac.piece_type} "
+                    rf"({sac.material_lost}cp). {sound_str}. "
+                    rf"Evaluation: {sac.eval_before/100:+.2f} $\rightarrow$ {sac.eval_after/100:+.2f}"
+                )
+            
+            lines.extend([r"\end{itemize}", r""])
+        
+        # Annotated Game
+        lines.extend([
+            r"\section{Annotated Game}",
+            r"",
+            r"\begin{quote}",
+        ])
+        
+        current_line = ""
+        for move in analysis.moves:
+            move_num = (move.ply + 1) // 2
+            
+            if move.is_white_move:
+                if current_line:
+                    lines.append(current_line)
+                current_line = f"{move_num}. {move.move_san}"
+            else:
+                if current_line:
+                    current_line += f" {move.move_san}"
+                else:
+                    current_line = f"{move_num}...{move.move_san}"
+            
+            # NAG annotations
+            if move.classification == "blunder":
+                current_line += "??"
+            elif move.classification == "mistake":
+                current_line += "?"
+            elif move.classification == "inaccuracy":
+                current_line += "?!"
+            elif move.classification == "best" and move.move_san == move.best_move_san:
+                current_line += "!"
+            
+            # Comments for significant moves
+            if move.classification in ["blunder", "mistake"]:
+                lines.append(current_line)
+                player = "White" if move.is_white_move else "Black"
+                comment = f"{player} loses {move.eval_loss:.0f}cp. Better was {esc(move.best_move_san)}."
+                lines.append(rf"\textit{{{comment}}}")
+                lines.append("")
+                current_line = ""
+        
+        if current_line:
+            lines.append(current_line)
+        
+        lines.extend([
+            r"",
+            esc(analysis.result),
+            r"\end{quote}",
+            r"",
+        ])
+        
+        # Critical Positions
+        if include_diagrams and analysis.critical_positions:
+            lines.extend([
+                r"\section{Critical Positions}",
+                r"",
+            ])
+            
+            for i, pos in enumerate(analysis.critical_positions, 1):
+                move_num = (pos.ply + 1) // 2
+                is_white = pos.ply % 2 == 1
+                move_str = f"{move_num}. {pos.move_san}" if is_white else f"{move_num}...{pos.move_san}"
+                
+                if pos.is_biggest_swing:
+                    subsection_title = rf"\subsection*{{\textcolor{{blue}}{{Position {i}: After {esc(move_str)} $\bigstar$}}}}"
+                    reason_text = rf"\textit{{\textcolor{{blue}}{{{esc(pos.reason)}}}}}"
+                else:
+                    subsection_title = rf"\subsection*{{Position {i}: After {esc(move_str)}}}"
+                    reason_text = rf"\textit{{{esc(pos.reason)}}}"
+                
+                lines.extend([
+                    subsection_title,
+                    reason_text,
+                    r"",
+                    rf"Evaluation: {pos.eval_score/100:+.2f}",
+                    r"",
+                    r"\chessboard[setfen=" + pos.fen + "]",
+                    r"",
+                ])
+                
+                if pos.positional_eval:
+                    pe = pos.positional_eval
+                    lines.extend([
+                        r"\begin{small}",
+                        r"\begin{tabular}{lcc}",
+                        r"\toprule",
+                        r"Metric & White & Black \\",
+                        r"\midrule",
+                        rf"Space & {pe.space_white:.2f} & {pe.space_black:.2f} \\",
+                        rf"Mobility (MG) & {pe.mobility_white_mg:.2f} & {pe.mobility_black_mg:.2f} \\",
+                        rf"King Safety & {pe.king_safety_white:.2f} & {pe.king_safety_black:.2f} \\",
+                        rf"Threats & {pe.threats_white:.2f} & {pe.threats_black:.2f} \\",
+                        r"\bottomrule",
+                        r"\end{tabular}",
+                        r"\end{small}",
+                        r"",
+                    ])
+                
+                if pos.best_continuation:
+                    cont_str = " ".join(esc(m) for m in pos.best_continuation[:5])
+                    lines.append(rf"Best continuation: {cont_str}")
+                
+                lines.append(r"")
+        
+        # Analysis Metadata for this game
+        lines.extend([
+            r"\section{Analysis Information}",
+            r"\begin{itemize}",
+            rf"\item Engine: {esc(analysis.engine_version)}",
+            rf"\item Depth: {analysis.analysis_depth}",
+            rf"\item Analysis time: {analysis.analysis_time:.1f} seconds",
+            r"\end{itemize}",
+            r"",
+        ])
+        
+        return lines
+    
+    @staticmethod
+    def _generate_positional_section_for_book(analysis: EnhancedGameAnalysisResult,
+                                              game_num: int,
+                                              include_plots: bool = True,
+                                              include_ascii_plots: bool = False,
+                                              plot_output_dir: str = ".") -> List[str]:
+        """Generate the positional analysis section for a book chapter with unique plot filenames."""
+        lines = [
+            r"\section{Positional Analysis}",
+            r"",
+            r"This section shows how key positional factors evolved throughout the game.",
+            r"",
+        ]
+        
+        ps = analysis.positional_summary
+        
+        # Generate plots with game_num prefix for unique filenames
+        plot_files = {}
+        if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available() and analysis.moves:
+            for metric in ['eval', 'space', 'mobility', 'king_safety', 'threats']:
+                filename = f"plot_game{game_num}_{metric}.pdf"
+                filepath = os.path.join(plot_output_dir, filename)
+                success = ChessPlotter.generate_matplotlib_plot(
+                    analysis.moves, metric, filepath
+                )
+                if success:
+                    plot_files[metric] = filepath
+        
+        # Evaluation plot section
+        lines.extend([
+            r"\subsection{Position Evaluation Over Time}",
+            r"",
+        ])
+        
+        # Add game character classification if available
+        gc = analysis.game_character
+        if gc:
+            m1 = gc.get('m1', 0)
+            m2 = gc.get('m2', 0)
+            spread = gc.get('spread', 0)
+            spread_class = gc.get('spread_class', 'unknown')
+            direction_class = gc.get('direction_class', 'normal')
+            description = gc.get('combined_description', '')
+            
+            lines.extend([
+                r"\paragraph{Game Character Classification.}",
+                rf"Evaluation range: minimum $m_1 = {m1:+.2f}$, maximum $m_2 = {m2:+.2f}$, "
+                rf"spread $d = m_2 - m_1 = {spread:.2f}$.",
+                r"",
+                rf"This game is classified as \textbf{{{spread_class}}} "
+                rf"({direction_class}). {description}",
+                r"",
+            ])
+        
+        if 'eval' in plot_files:
+            lines.extend([
+                r"\begin{center}",
+                rf"\includegraphics[width=0.9\textwidth]{{{plot_files['eval']}}}",
+                r"\end{center}",
+                r"",
+            ])
+        
+        if include_ascii_plots and analysis.moves and PLOTTING_AVAILABLE:
+            ascii_plot = ChessPlotter.generate_ascii_plot(analysis.moves, 'eval')
+            lines.extend([
+                r"\begin{verbatim}",
+                ascii_plot,
+                r"\end{verbatim}",
+                r"",
+            ])
+        
+        # Space analysis
+        if ps.get('space'):
+            space = ps['space']
+            lines.extend([
+                r"\subsection{Space Control}",
+                r"",
+                r"\begin{itemize}",
+                rf"\item White average: {space['white']['avg']:.2f} (range: {space['white']['min']:.2f} to {space['white']['max']:.2f})",
+                rf"\item Black average: {space['black']['avg']:.2f} (range: {space['black']['min']:.2f} to {space['black']['max']:.2f})",
+                r"\end{itemize}",
+                r"",
+            ])
+            
+            if 'space' in plot_files:
+                lines.extend([
+                    r"\begin{center}",
+                    rf"\includegraphics[width=0.9\textwidth]{{{plot_files['space']}}}",
+                    r"\end{center}",
+                    r"",
+                ])
+        
+        # Mobility analysis
+        if ps.get('mobility'):
+            mob = ps['mobility']
+            lines.extend([
+                r"\subsection{Mobility (Piece Activity)}",
+                r"",
+                r"\begin{itemize}",
+                rf"\item White average: {mob['white']['avg']:.2f} (range: {mob['white']['min']:.2f} to {mob['white']['max']:.2f})",
+                rf"\item Black average: {mob['black']['avg']:.2f} (range: {mob['black']['min']:.2f} to {mob['black']['max']:.2f})",
+                r"\end{itemize}",
+                r"",
+            ])
+            
+            if 'mobility' in plot_files:
+                lines.extend([
+                    r"\begin{center}",
+                    rf"\includegraphics[width=0.9\textwidth]{{{plot_files['mobility']}}}",
+                    r"\end{center}",
+                    r"",
+                ])
+        
+        # King safety analysis
+        if ps.get('king_safety'):
+            ks = ps['king_safety']
+            lines.extend([
+                r"\subsection{King Safety}",
+                r"",
+                r"\begin{itemize}",
+                rf"\item White average: {ks['white']['avg']:.2f}",
+                rf"\item Black average: {ks['black']['avg']:.2f}",
+                r"\end{itemize}",
+                r"",
+            ])
+            
+            if 'king_safety' in plot_files:
+                lines.extend([
+                    r"\begin{center}",
+                    rf"\includegraphics[width=0.9\textwidth]{{{plot_files['king_safety']}}}",
+                    r"\end{center}",
+                    r"",
+                ])
+        
+        # Threats analysis
+        if ps.get('threats'):
+            th = ps['threats']
+            lines.extend([
+                r"\subsection{Threats}",
+                r"",
+                r"\begin{itemize}",
+                rf"\item White average: {th['white']['avg']:.2f} (range: {th['white']['min']:.2f} to {th['white']['max']:.2f})",
+                rf"\item Black average: {th['black']['avg']:.2f} (range: {th['black']['min']:.2f} to {th['black']['max']:.2f})",
+            ])
+            
+            if th['advantage']['avg'] > 0.1:
+                lines.append(rf"\item Average advantage: {th['advantage']['avg']:.2f} (White maintained more threats)")
+            elif th['advantage']['avg'] < -0.1:
+                lines.append(rf"\item Average advantage: {th['advantage']['avg']:.2f} (Black maintained more threats)")
+            else:
+                lines.append(rf"\item Average advantage: {th['advantage']['avg']:.2f} (threats were balanced)")
+            
+            lines.extend([
+                r"\end{itemize}",
+                r"",
+            ])
+            
+            if 'threats' in plot_files:
+                lines.extend([
+                    r"\begin{center}",
+                    rf"\includegraphics[width=0.9\textwidth]{{{plot_files['threats']}}}",
+                    r"\end{center}",
+                    r"",
+                ])
+        
+        return lines
 
 
 # =============================================================================
@@ -1873,6 +2602,107 @@ def analyze_game_with_positional_metrics(
             print(f"Plot files saved to: {plot_output_dir}")
     
     return latex_content
+
+
+def analyze_games_to_book(
+    pgn_source: Union[str, io.StringIO],
+    output_path: str,
+    book_title: str = "Chess Game Collection Analysis",
+    author: str = None,
+    stockfish_path: str = "/usr/games/stockfish",
+    depth: int = 20,
+    time_limit: float = 1.0,
+    include_diagrams: bool = True,
+    include_methodology: bool = True,
+    include_plots: bool = True,
+    include_ascii_plots: bool = False,
+    plot_output_dir: str = None,
+    top_n_swings: int = 2,
+    verbose: bool = True
+) -> Tuple[str, List[EnhancedGameAnalysisResult]]:
+    """
+    Analyze all games in a PGN file and generate a LaTeX book with each game as a chapter.
+    
+    Args:
+        pgn_source: Path to PGN file containing one or more games
+        output_path: Path to save LaTeX book file
+        book_title: Title for the book
+        author: Author name (defaults to engine version)
+        stockfish_path: Path to Stockfish executable
+        depth: Analysis depth (default 20)
+        time_limit: Time per position in seconds (default 1.0)
+        include_diagrams: Include chess board diagrams in report
+        include_methodology: Include methodology explanation as appendix
+        include_plots: Include matplotlib plots (requires matplotlib)
+        include_ascii_plots: Include ASCII plots in verbatim environment
+        plot_output_dir: Directory for plot files (defaults to same dir as output)
+        top_n_swings: Number of "biggest swing" positions per game (default: 2)
+        verbose: Print progress messages
+        
+    Returns:
+        Tuple of (LaTeX content as string, list of EnhancedGameAnalysisResult objects)
+        
+    Example:
+        >>> latex, results = analyze_games_to_book(
+        ...     "tournament_games.pgn",
+        ...     "tournament_analysis.tex",
+        ...     book_title="Club Championship 2026",
+        ...     author="Chess Club Analysis Team"
+        ... )
+        >>> print(f"Analyzed {len(results)} games")
+    """
+    if verbose:
+        print(f"Starting multi-game book analysis (depth={depth}, time={time_limit}s per position)...")
+        if include_plots:
+            if PLOTTING_AVAILABLE and is_matplotlib_available():
+                print("Matplotlib plots: ENABLED")
+            else:
+                print("Matplotlib plots: DISABLED (matplotlib not available)")
+        if include_ascii_plots:
+            print("ASCII plots: ENABLED")
+    
+    with EnhancedGameAnalyzer(stockfish_path, depth, time_limit) as analyzer:
+        if verbose:
+            print(f"Engine: {analyzer.engine_version}")
+        
+        analyses = analyzer.analyze_all_games(
+            pgn_source,
+            top_n_swings=top_n_swings,
+            verbose=verbose
+        )
+        
+        if not analyses:
+            raise ValueError("No games found in PGN file")
+        
+        if verbose:
+            total_time = sum(a.analysis_time for a in analyses)
+            print(f"All games analyzed in {total_time:.1f}s total")
+    
+    # Determine plot output directory
+    if plot_output_dir is None:
+        plot_output_dir = os.path.dirname(output_path) or "."
+    
+    # Generate book report
+    latex_content = EnhancedLaTeXReportGenerator.generate_book_report(
+        analyses,
+        book_title=book_title,
+        author=author,
+        include_diagrams=include_diagrams,
+        include_methodology=include_methodology,
+        include_plots=include_plots,
+        include_ascii_plots=include_ascii_plots,
+        plot_output_dir=plot_output_dir
+    )
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(latex_content)
+    
+    if verbose:
+        print(f"LaTeX book saved to: {output_path}")
+        if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available():
+            print(f"Plot files saved to: {plot_output_dir}")
+    
+    return latex_content, analyses
 
 
 def get_position_metrics(fen: str, stockfish_path: str = "/usr/games/stockfish") -> PositionalEvaluation:
@@ -2051,28 +2881,31 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Analyze a chess game with detailed positional metrics and plots",
+        description="Analyze chess games with detailed positional metrics and plots",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage with positional analysis and plots
-  python chess_game_analyzer5.py game.pgn -o analysis.tex
+  # Basic usage with positional analysis and plots (single game)
+  python chess_game_analyzer.py game.pgn -o analysis.tex
+  
+  # Analyze all games in PGN as a book (multiple games)
+  python chess_game_analyzer.py games.pgn -o analysis.tex --book --book-title "My Games"
   
   # With ASCII plots only (no matplotlib needed)
-  python chess_game_analyzer5.py game.pgn -o analysis.tex --ascii-plots --no-plots
+  python chess_game_analyzer.py game.pgn -o analysis.tex --ascii-plots --no-plots
   
   # Both matplotlib and ASCII plots
-  python chess_game_analyzer5.py game.pgn -o analysis.tex --ascii-plots
+  python chess_game_analyzer.py game.pgn -o analysis.tex --ascii-plots
   
   # Skip methodology explanation
-  python chess_game_analyzer5.py game.pgn -o analysis.tex --no-methodology
+  python chess_game_analyzer.py game.pgn -o analysis.tex --no-methodology
   
   # Get just the raw analysis data (JSON output)
-  python chess_game_analyzer5.py game.pgn --json-output analysis.json
+  python chess_game_analyzer.py game.pgn --json-output analysis.json
         """
     )
     
-    parser.add_argument("pgn_file", help="Path to PGN file")
+    parser.add_argument("pgn_file", help="Path to PGN file (can contain multiple games)")
     parser.add_argument("-o", "--output", help="Output LaTeX file")
     parser.add_argument("--json-output", help="Output raw analysis as JSON")
     parser.add_argument("-s", "--stockfish", default="/usr/games/stockfish",
@@ -2094,66 +2927,138 @@ Examples:
     parser.add_argument("-q", "--quiet", action="store_true",
                        help="Suppress progress messages")
     
+    # Multi-game book options
+    parser.add_argument("--book", action="store_true",
+                       help="Analyze all games in PGN and generate a book (LaTeX book class)")
+    parser.add_argument("--book-title", default="Chess Game Collection Analysis",
+                       help="Title for the book (used with --book)")
+    parser.add_argument("--book-author", default=None,
+                       help="Author for the book (used with --book)")
+    
     args = parser.parse_args()
     
-    # Run analysis
-    with EnhancedGameAnalyzer(args.stockfish, args.depth, args.time) as analyzer:
-        if not args.quiet:
-            print(f"Analyzing with {analyzer.engine_version}...")
-        
-        analysis = analyzer.analyze_game(args.pgn_file)
-        
-        if not args.quiet:
-            print(f"Analysis complete in {analysis.analysis_time:.1f}s")
+    plot_dir = args.plot_dir or (os.path.dirname(args.output) if args.output else ".") or "."
     
-    # Output LaTeX
-    if args.output:
-        plot_dir = args.plot_dir or os.path.dirname(args.output) or "."
+    if args.book:
+        # Multi-game book mode
+        with EnhancedGameAnalyzer(args.stockfish, args.depth, args.time) as analyzer:
+            if not args.quiet:
+                print(f"Analyzing all games with {analyzer.engine_version}...")
+            
+            analyses = analyzer.analyze_all_games(args.pgn_file, verbose=not args.quiet)
+            
+            if not analyses:
+                print("No games found in PGN file")
+                return
+            
+            if not args.quiet:
+                total_time = sum(a.analysis_time for a in analyses)
+                print(f"All {len(analyses)} games analyzed in {total_time:.1f}s total")
         
-        latex_content = EnhancedLaTeXReportGenerator.generate_report(
-            analysis,
-            include_diagrams=not args.no_diagrams,
-            include_methodology=not args.no_methodology,
-            include_plots=not args.no_plots,
-            include_ascii_plots=args.ascii_plots,
-            plot_output_dir=plot_dir
-        )
+        # Output LaTeX book
+        if args.output:
+            latex_content = EnhancedLaTeXReportGenerator.generate_book_report(
+                analyses,
+                book_title=args.book_title,
+                author=args.book_author,
+                include_diagrams=not args.no_diagrams,
+                include_methodology=not args.no_methodology,
+                include_plots=not args.no_plots,
+                include_ascii_plots=args.ascii_plots,
+                plot_output_dir=plot_dir
+            )
+            
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(latex_content)
+            
+            if not args.quiet:
+                print(f"LaTeX book saved to: {args.output}")
         
-        with open(args.output, 'w', encoding='utf-8') as f:
-            f.write(latex_content)
+        # Output JSON (list of all analyses)
+        if args.json_output:
+            import json
+            from dataclasses import asdict
+            
+            def to_dict(obj):
+                if hasattr(obj, '__dataclass_fields__'):
+                    return {k: to_dict(v) for k, v in asdict(obj).items()}
+                elif isinstance(obj, list):
+                    return [to_dict(item) for item in obj]
+                elif isinstance(obj, dict):
+                    return {k: to_dict(v) for k, v in obj.items()}
+                return obj
+            
+            with open(args.json_output, 'w') as f:
+                json.dump([to_dict(a) for a in analyses], f, indent=2)
+            
+            if not args.quiet:
+                print(f"JSON output saved to: {args.json_output}")
         
-        if not args.quiet:
-            print(f"LaTeX report saved to: {args.output}")
+        if not args.output and not args.json_output:
+            # Print summary to stdout
+            print(f"\nAnalyzed {len(analyses)} games:")
+            for i, analysis in enumerate(analyses, 1):
+                print(f"\n  Game {i}: {analysis.white} vs {analysis.black}")
+                print(f"    Result: {analysis.result}")
+                print(f"    White accuracy: {analysis.white_stats['accuracy']:.1f}%")
+                print(f"    Black accuracy: {analysis.black_stats['accuracy']:.1f}%")
     
-    # Output JSON
-    if args.json_output:
-        import json
-        from dataclasses import asdict
+    else:
+        # Single game mode (original behavior)
+        with EnhancedGameAnalyzer(args.stockfish, args.depth, args.time) as analyzer:
+            if not args.quiet:
+                print(f"Analyzing with {analyzer.engine_version}...")
+            
+            analysis = analyzer.analyze_game(args.pgn_file)
+            
+            if not args.quiet:
+                print(f"Analysis complete in {analysis.analysis_time:.1f}s")
         
-        # Convert to dict (handling dataclasses)
-        def to_dict(obj):
-            if hasattr(obj, '__dataclass_fields__'):
-                return {k: to_dict(v) for k, v in asdict(obj).items()}
-            elif isinstance(obj, list):
-                return [to_dict(item) for item in obj]
-            elif isinstance(obj, dict):
-                return {k: to_dict(v) for k, v in obj.items()}
-            return obj
+        # Output LaTeX
+        if args.output:
+            latex_content = EnhancedLaTeXReportGenerator.generate_report(
+                analysis,
+                include_diagrams=not args.no_diagrams,
+                include_methodology=not args.no_methodology,
+                include_plots=not args.no_plots,
+                include_ascii_plots=args.ascii_plots,
+                plot_output_dir=plot_dir
+            )
+            
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(latex_content)
+            
+            if not args.quiet:
+                print(f"LaTeX report saved to: {args.output}")
         
-        with open(args.json_output, 'w') as f:
-            json.dump(to_dict(analysis), f, indent=2)
+        # Output JSON
+        if args.json_output:
+            import json
+            from dataclasses import asdict
+            
+            def to_dict(obj):
+                if hasattr(obj, '__dataclass_fields__'):
+                    return {k: to_dict(v) for k, v in asdict(obj).items()}
+                elif isinstance(obj, list):
+                    return [to_dict(item) for item in obj]
+                elif isinstance(obj, dict):
+                    return {k: to_dict(v) for k, v in obj.items()}
+                return obj
+            
+            with open(args.json_output, 'w') as f:
+                json.dump(to_dict(analysis), f, indent=2)
+            
+            if not args.quiet:
+                print(f"JSON output saved to: {args.json_output}")
         
-        if not args.quiet:
-            print(f"JSON output saved to: {args.json_output}")
-    
-    if not args.output and not args.json_output:
-        # Print summary to stdout
-        print(f"\n{analysis.white} vs {analysis.black}")
-        print(f"Result: {analysis.result}")
-        print(f"\nWhite: {analysis.white_stats['accuracy']:.1f}% accuracy, "
-              f"avg space {analysis.white_stats.get('avg_space', 0):.2f}")
-        print(f"Black: {analysis.black_stats['accuracy']:.1f}% accuracy, "
-              f"avg space {analysis.black_stats.get('avg_space', 0):.2f}")
+        if not args.output and not args.json_output:
+            # Print summary to stdout
+            print(f"\n{analysis.white} vs {analysis.black}")
+            print(f"Result: {analysis.result}")
+            print(f"\nWhite: {analysis.white_stats['accuracy']:.1f}% accuracy, "
+                  f"avg space {analysis.white_stats.get('avg_space', 0):.2f}")
+            print(f"Black: {analysis.black_stats['accuracy']:.1f}% accuracy, "
+                  f"avg space {analysis.black_stats.get('avg_space', 0):.2f}")
 
 
 if __name__ == "__main__":
