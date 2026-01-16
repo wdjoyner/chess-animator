@@ -14,6 +14,9 @@ NEW IN THIS VERSION:
 - Move-by-move matplotlib plots of evaluation, space, mobility, and king safety
 - Optional ASCII plots for environments without matplotlib/graphics support
 - Plots show White (solid) vs Black (dotted) on the same axis
+- Game character classification (balanced/tense/tactical/chaotic, one-sided/seesaw)
+- Multi-PV analysis: suggests playable alternative moves (within 50cp of best)
+- Improved mistake annotations: "Consider instead: Nf3, Bg5." format
 
 This module uses python-chess for direct board analysis to compute interpretable
 positional metrics, while using Stockfish only for overall centipawn evaluation.
@@ -61,7 +64,7 @@ Evaluates tactical tension (computed directly from board position):
 - Available checking moves for the side to move
 
 Usage:
-    from chess_game_analyzer6e import (
+    from chess_game_analyzer6g import (
         analyze_game_with_positional_metrics,
         PositionalEvaluation,
         EnhancedMoveAnalysis,
@@ -71,7 +74,7 @@ Usage:
     
     # Get analysis with full positional breakdown and plots
     game_pgn = "../wdj-games/james-rizzitano-vs-wdj-sussex-open-2026-01-10.pgn"
-    report_output = "../wdj-games/james-rizzitano-vs-wdj-sussex-open-2026-01-10-analysis4.tex"
+    report_output = "../wdj-games/james-rizzitano-vs-wdj-sussex-open-2026-01-10-analysis.tex"
     result = analyze_game_with_positional_metrics(
         pgn_source=game_pgn,
         output_path=report_output,
@@ -89,11 +92,12 @@ Usage:
     print(f"Game character: {gc['spread_class']} ({gc['direction_class']})")
     print(f"  m1={gc['m1']:.2f}, m2={gc['m2']:.2f}, spread={gc['spread']:.2f}")
 
-    >>> from chess_game_analyzer6e import (
+    >>> from chess_game_analyzer6g import (
     ...         analyze_game_with_positional_metrics,
     ...         PositionalEvaluation,
     ...         EnhancedMoveAnalysis,
-    ...         analyze_games_to_book
+    ...         analyze_games_to_book,
+                classify_game_character
     ...     )
     >>> game_pgn = "../wdj-games/Joyner-vs-Goodson_2023-05-16.pgn"
     >>> report_output = "../wdj-games/Joyner-vs-Goodson_2023-05-16-analysis.tex"
@@ -137,6 +141,10 @@ PIECE_VALUES = {
     chess.QUEEN: 900,
     chess.KING: 0
 }
+
+# Threshold (in centipawns) for considering alternative moves as "playable"
+# Moves within this threshold of the best move will be suggested as alternatives
+PLAYABLE_THRESHOLD = 50
 
 
 # =============================================================================
@@ -402,6 +410,10 @@ class EnhancedMoveAnalysis:
     
     # Enhanced: Positional evaluation after this move
     positional_eval: Optional[PositionalEvaluation] = None
+    
+    # Alternative moves: list of (san, eval_cp) tuples for playable alternatives
+    # Only includes moves within PLAYABLE_THRESHOLD of the best move
+    alternative_moves: List[Tuple[str, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -982,8 +994,17 @@ class EnhancedGameAnalyzer:
                 ply = board.ply() + 1
                 is_white_move = board.turn == chess.WHITE
                 
-                # A. Analyze BEFORE push to get Best Move and correct SAN strings
-                info_before = self.engine.analyse(board, chess.engine.Limit(depth=self.depth))
+                # A. Analyze BEFORE push to get Best Move and alternatives (multipv=3)
+                info_before_list = self.engine.analyse(
+                    board, 
+                    chess.engine.Limit(depth=self.depth),
+                    multipv=3
+                )
+                # Handle both single dict (multipv=1) and list (multipv>1) returns
+                if isinstance(info_before_list, dict):
+                    info_before_list = [info_before_list]
+                
+                info_before = info_before_list[0]  # Best line
                 best_move = info_before.get('pv', [None])[0]
                 
                 # Capture SAN strings while it's still the moving player's turn
@@ -991,6 +1012,17 @@ class EnhancedGameAnalyzer:
                 best_san = board.san(best_move) if best_move else "-"
                 is_capture = board.is_capture(node.move)
                 best_eval = self._eval_to_cp(info_before['score'])
+                
+                # Extract playable alternative moves (within PLAYABLE_THRESHOLD of best)
+                alternative_moves = []
+                for alt_info in info_before_list[1:]:  # Skip the best move (index 0)
+                    alt_move = alt_info.get('pv', [None])[0]
+                    if alt_move and alt_move in board.legal_moves:
+                        alt_eval = self._eval_to_cp(alt_info['score'])
+                        eval_diff = abs(best_eval - alt_eval)
+                        if eval_diff <= PLAYABLE_THRESHOLD:
+                            alt_san = board.san(alt_move)
+                            alternative_moves.append((alt_san, alt_eval))
                 
                 # B. Execute the move
                 move = node.move
@@ -1024,7 +1056,8 @@ class EnhancedGameAnalyzer:
                     best_eval=best_eval, eval_loss=eval_loss, classification=classification,
                     is_capture=is_capture, is_check=board.is_check(),
                     material_balance=current_material, fen_after=board.fen(),
-                    pv_line=pv_san, positional_eval=pos_eval
+                    pv_line=pv_san, positional_eval=pos_eval,
+                    alternative_moves=alternative_moves
                 )
                 moves_analysis.append(move_analysis)
                 
@@ -1552,12 +1585,12 @@ class EnhancedLaTeXReportGenerator:
             if move.is_white_move:
                 if current_line:
                     lines.append(current_line)
-                current_line = f"{move_num}. {move.move_san}"
+                current_line = f"{move_num}. {esc(move.move_san)}"
             else:
                 if current_line:
-                    current_line += f" {move.move_san}"
+                    current_line += f" {esc(move.move_san)}"
                 else:
-                    current_line = f"{move_num}...{move.move_san}"
+                    current_line = f"{move_num}...{esc(move.move_san)}"
             
             # NAG annotations
             if move.classification == "blunder":
@@ -1573,7 +1606,21 @@ class EnhancedLaTeXReportGenerator:
             if move.classification in ["blunder", "mistake"]:
                 lines.append(current_line)
                 player = "White" if move.is_white_move else "Black"
-                comment = f"{player} loses {move.eval_loss:.0f}cp. Better was {esc(move.best_move_san)}."
+                # Don't show alternatives when the played move equals the best move
+                if move.move_san == move.best_move_san or move.move_uci == move.best_move_uci:
+                    # Edge case: move classified as error but matches best move
+                    comment = f"{player} loses {move.eval_loss:.0f}cp."
+                else:
+                    # Build list of moves to consider: best move + playable alternatives
+                    moves_to_consider = [esc(move.best_move_san)]
+                    for alt_san, alt_eval in move.alternative_moves:
+                        if alt_san != move.best_move_san:  # Don't duplicate best move
+                            moves_to_consider.append(esc(alt_san))
+                    
+                    if len(moves_to_consider) == 1:
+                        comment = f"{player} loses {move.eval_loss:.0f}cp. Consider instead: {moves_to_consider[0]}."
+                    else:
+                        comment = f"{player} loses {move.eval_loss:.0f}cp. Consider instead: {', '.join(moves_to_consider)}."
                 lines.append(rf"\textit{{{comment}}}")
                 lines.append("")
                 current_line = ""
@@ -2210,12 +2257,12 @@ class EnhancedLaTeXReportGenerator:
             if move.is_white_move:
                 if current_line:
                     lines.append(current_line)
-                current_line = f"{move_num}. {move.move_san}"
+                current_line = f"{move_num}. {esc(move.move_san)}"
             else:
                 if current_line:
-                    current_line += f" {move.move_san}"
+                    current_line += f" {esc(move.move_san)}"
                 else:
-                    current_line = f"{move_num}...{move.move_san}"
+                    current_line = f"{move_num}...{esc(move.move_san)}"
             
             # NAG annotations
             if move.classification == "blunder":
@@ -2231,7 +2278,21 @@ class EnhancedLaTeXReportGenerator:
             if move.classification in ["blunder", "mistake"]:
                 lines.append(current_line)
                 player = "White" if move.is_white_move else "Black"
-                comment = f"{player} loses {move.eval_loss:.0f}cp. Better was {esc(move.best_move_san)}."
+                # Don't show alternatives when the played move equals the best move
+                if move.move_san == move.best_move_san or move.move_uci == move.best_move_uci:
+                    # Edge case: move classified as error but matches best move
+                    comment = f"{player} loses {move.eval_loss:.0f}cp."
+                else:
+                    # Build list of moves to consider: best move + playable alternatives
+                    moves_to_consider = [esc(move.best_move_san)]
+                    for alt_san, alt_eval in move.alternative_moves:
+                        if alt_san != move.best_move_san:  # Don't duplicate best move
+                            moves_to_consider.append(esc(alt_san))
+                    
+                    if len(moves_to_consider) == 1:
+                        comment = f"{player} loses {move.eval_loss:.0f}cp. Consider instead: {moves_to_consider[0]}."
+                    else:
+                        comment = f"{player} loses {move.eval_loss:.0f}cp. Consider instead: {', '.join(moves_to_consider)}."
                 lines.append(rf"\textit{{{comment}}}")
                 lines.append("")
                 current_line = ""
