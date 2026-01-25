@@ -106,13 +106,12 @@ Usage:
     >>> report_output = "../wdj-games/Joyner-vs-Goodson_2023-05-16-analysis.tex"
     >>> result = analyze_game_with_positional_metrics(pgn_source=game_pgn,output_path=report_output,include_plots=True,include_ascii_plots=False, plot_output_dir = "../wdj-games/plots/")
 
-NEW IN VERSION 6q:
+
+NEW IN VERSION 6r, 6s:
 - Raw positional data preserved after \\end{document} in machine-readable format
 - Data includes: ply, SAN, eval_cp, space_w/b, mobility_w/b, king_safety_w/b, threats_w/b
 - New utility functions: parse_raw_positional_data(), compute_fireteam_index()
 - Enables downstream analysis like the "Fireteam Index" for win prediction
-
-NEW IN VERSION 6r:
 - Win prediction algorithms: predict_outcome_per_ply() and predict_outcome_windowed()
 - Optional Fireteam Index prediction section in LaTeX reports (include_prediction=True)
 - Fireteam Index plots (per-ply and smoothed versions) in reports
@@ -124,7 +123,7 @@ NEW IN VERSION 6r:
   accuracy statistics. Previously, games with missed mates could show <20% accuracy
   even for strong play, because a single "lose mate" move counted as 9000+ cp loss.
 
-Author: Generated for David Joyner's chess analysis pipeline, 2026-01-24
+Author: Generated for David Joyner's chess analysis pipeline, 2026-01-25
 distribution license: either modified BSD or MIT license, user's choice.
 """
 
