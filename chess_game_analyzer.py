@@ -64,7 +64,7 @@ Evaluates tactical tension (computed directly from board position):
 - Available checking moves for the side to move
 
 Usage:
-    from chess_game_analyzer6g import (
+    from chess_game_analyzer import (
         analyze_game_with_positional_metrics,
         PositionalEvaluation,
         EnhancedMoveAnalysis,
@@ -78,8 +78,11 @@ Usage:
     result = analyze_game_with_positional_metrics(
         pgn_source=game_pgn,
         output_path=report_output,
-        include_plots=True,        # matplotlib plots
-        include_ascii_plots=False,   # ASCII verbatim plots
+        stockfish_path = "/usr/local/bin/stockfish", # modify as needed
+        include_plots=True,                          # matplotlib plots
+        include_ascii_plots=False,                   # ASCII verbatim plots
+        depth=22,
+        time_limit=5.0,                              # longer for complex games
         plot_output_dir = "../wdj-games/plots/"
     )
     for move in result.moves:
@@ -92,7 +95,7 @@ Usage:
     print(f"Game character: {gc['spread_class']} ({gc['direction_class']})")
     print(f"  m1={gc['m1']:.2f}, m2={gc['m2']:.2f}, spread={gc['spread']:.2f}")
 
-    >>> from chess_game_analyzer6g import (
+    >>> from chess_game_analyzer import (
     ...         analyze_game_with_positional_metrics,
     ...         PositionalEvaluation,
     ...         EnhancedMoveAnalysis,
@@ -103,7 +106,25 @@ Usage:
     >>> report_output = "../wdj-games/Joyner-vs-Goodson_2023-05-16-analysis.tex"
     >>> result = analyze_game_with_positional_metrics(pgn_source=game_pgn,output_path=report_output,include_plots=True,include_ascii_plots=False, plot_output_dir = "../wdj-games/plots/")
 
-Author: Generated for David Joyner's chess analysis pipeline, 2026-01-12
+NEW IN VERSION 6q:
+- Raw positional data preserved after \\end{document} in machine-readable format
+- Data includes: ply, SAN, eval_cp, space_w/b, mobility_w/b, king_safety_w/b, threats_w/b
+- New utility functions: parse_raw_positional_data(), compute_fireteam_index()
+- Enables downstream analysis like the "Fireteam Index" for win prediction
+
+NEW IN VERSION 6r:
+- Win prediction algorithms: predict_outcome_per_ply() and predict_outcome_windowed()
+- Optional Fireteam Index prediction section in LaTeX reports (include_prediction=True)
+- Fireteam Index plots (per-ply and smoothed versions) in reports
+- Renamed berliner_color to player_color with optional player_name parameter
+- Configurable weights, cutoff, margin, streak length, and window size
+- BUG FIX: eval_loss calculation now uses proper sign convention for Black moves
+- BUG FIX: eval_loss capped at MAX_EVAL_LOSS_FOR_ACCURACY (1500cp) to prevent
+  mate score transitions from producing absurd values (8000+ cp) that distort
+  accuracy statistics. Previously, games with missed mates could show <20% accuracy
+  even for strong play, because a single "lose mate" move counted as 9000+ cp loss.
+
+Author: Generated for David Joyner's chess analysis pipeline, 2026-01-24
 distribution license: either modified BSD or MIT license, user's choice.
 """
 
@@ -145,6 +166,37 @@ PIECE_VALUES = {
 # Threshold (in centipawns) for considering alternative moves as "playable"
 # Moves within this threshold of the best move will be suggested as alternatives
 PLAYABLE_THRESHOLD = 50
+
+# Maximum eval_loss to count towards accuracy calculations (in centipawns)
+# This prevents mate score transitions from producing absurd values (8000+ cp)
+# that would completely distort accuracy statistics. A cap of 1500cp (15 pawns)
+# still represents a catastrophic blunder but won't ruin the entire game's stats.
+MAX_EVAL_LOSS_FOR_ACCURACY = 1500
+
+
+def parse_elo(elo_str: str) -> Optional[int]:
+    """
+    Safely parse an ELO rating from a PGN header value.
+    
+    Handles common non-numeric values like "?", "*", "", "-", "N/A", etc.
+    Returns None if the value cannot be parsed as a valid ELO rating.
+    """
+    if not elo_str:
+        return None
+    elo_str = elo_str.strip()
+    if not elo_str or elo_str in ("?", "*", "-", "N/A", "n/a", "unknown", "Unknown"):
+        return None
+    try:
+        elo = int(elo_str)
+        # Sanity check: valid ELO ratings are typically between 100 and 4000
+        if 100 <= elo <= 4000:
+            return elo
+        elif elo == 0:
+            return None  # 0 often means "unknown"
+        else:
+            return elo  # Return anyway if outside typical range but parseable
+    except ValueError:
+        return None
 
 
 # =============================================================================
@@ -442,7 +494,8 @@ class CriticalPosition:
     positional_eval: Optional[PositionalEvaluation] = None
     is_biggest_swing: bool = False  # True if this is a top-N biggest evaluation swing
     eval_swing: float = 0.0  # Magnitude of the evaluation change
-
+    alternative_moves: List[Tuple[str, float]] = field(default_factory=list)
+    best_move_san: str = ""  # The best move instead of the played move
 
 @dataclass
 class EnhancedGameAnalysisResult:
@@ -1032,7 +1085,34 @@ class EnhancedGameAnalyzer:
                 info_after = self.engine.analyse(board, chess.engine.Limit(depth=self.depth))
                 current_eval = self._eval_to_cp(info_after['score'])
                 current_material = self._calculate_material(board)
-                eval_loss = abs(best_eval - current_eval)
+                
+                # D. Calculate eval_loss properly
+                # The key insight: eval_loss should measure how much WORSE the played move
+                # is compared to the best move, from the perspective of the moving player.
+                #
+                # best_eval: evaluation if the best move was played (from White's perspective)
+                # current_eval: evaluation after the actual move (from White's perspective)
+                #
+                # For White: a good move increases eval, so loss = best_eval - current_eval
+                # For Black: a good move decreases eval, so loss = current_eval - best_eval
+                #
+                # We want loss >= 0 for bad moves, so:
+                if is_white_move:
+                    # White wants higher eval; if current < best, that's bad
+                    raw_eval_loss = best_eval - current_eval
+                else:
+                    # Black wants lower eval; if current > best, that's bad
+                    raw_eval_loss = current_eval - best_eval
+                
+                # Clamp negative values (move was better than engine's "best" - can happen 
+                # due to search instability or horizon effects)
+                raw_eval_loss = max(0, raw_eval_loss)
+                
+                # Cap eval_loss to avoid absurd values from mate score transitions
+                # When positions swing between "mate" and "no mate", raw differences
+                # can be 8000+ cp which distorts accuracy calculations.
+                eval_loss = min(raw_eval_loss, MAX_EVAL_LOSS_FOR_ACCURACY)
+                
                 classification = self._classify_move(eval_loss, ply)
                 
                 # D. Fix AssertionError: Safely generate PV SAN line using a temp board
@@ -1080,7 +1160,8 @@ class EnhancedGameAnalyzer:
                         ply=ply, fen=board.fen(), move_san=played_san, eval_score=current_eval,
                         reason=self._get_critical_reason(prev_eval, current_eval, classification, is_white_move),
                         best_continuation=pv_san, positional_eval=pos_eval,
-                        is_biggest_swing=False, eval_swing=eval_swing
+                        is_biggest_swing=False, eval_swing=eval_swing, alternative_moves=alternative_moves,
+                        best_move_san=best_san
                     ))
                     last_diagram_ply = ply
                 
@@ -1095,7 +1176,9 @@ class EnhancedGameAnalyzer:
                     'is_white_move': is_white_move,
                     'pv_san': pv_san,
                     'pos_eval': pos_eval,
-                    'eval_swing': eval_swing
+                    'eval_swing': eval_swing,
+                    'alternative_moves': alternative_moves,  # Include alternatives for biggest swing positions
+                    'best_move_san': best_san  # Include best move for biggest swing positions
                 })
                 
                 prev_eval = current_eval
@@ -1128,7 +1211,9 @@ class EnhancedGameAnalyzer:
                         best_continuation=swing_data['pv_san'],
                         positional_eval=swing_data['pos_eval'],
                         is_biggest_swing=True,
-                        eval_swing=swing_data['eval_swing']
+                        eval_swing=swing_data['eval_swing'],
+                        alternative_moves=swing_data.get('alternative_moves', []),
+                        best_move_san=swing_data.get('best_move_san', '')
                     ))
                     selected_plies.append(swing_data['ply'])
                     
@@ -1146,8 +1231,8 @@ class EnhancedGameAnalyzer:
             return EnhancedGameAnalysisResult(
                 white=game.headers.get("White", "Unknown"),
                 black=game.headers.get("Black", "Unknown"),
-                white_elo=int(game.headers.get("WhiteElo", 0)) or None,
-                black_elo=int(game.headers.get("BlackElo", 0)) or None,
+                white_elo=parse_elo(game.headers.get("WhiteElo", "")),
+                black_elo=parse_elo(game.headers.get("BlackElo", "")),
                 result=game.headers.get("Result", "*"),
                 date=game.headers.get("Date", "????.??.??"),
                 event=game.headers.get("Event", "Unknown"),
@@ -1286,7 +1371,17 @@ class EnhancedGameAnalyzer:
     def _calculate_player_stats(self, moves: List[EnhancedMoveAnalysis]) -> Dict:
         """Calculates performance statistics for a specific player."""
         if not moves:
-            return {'total_moves': 0, 'accuracy': 0, 'avg_centipawn_loss': 0}
+            return {
+                'total_moves': 0,
+                'accuracy': 0,
+                'avg_centipawn_loss': 0,
+                'best_moves': 0,
+                'excellent_moves': 0,
+                'good_moves': 0,
+                'inaccuracies': 0,
+                'mistakes': 0,
+                'blunders': 0
+            }
         
         import math
         avg_loss = sum(m.eval_loss for m in moves) / len(moves)
@@ -1382,6 +1477,73 @@ class EnhancedLaTeXReportGenerator:
     """Generates LaTeX reports with positional evaluation data."""
     
     @staticmethod
+    def generate_raw_data_block(analysis: 'EnhancedGameAnalysisResult', game_num: int = None) -> str:
+        """
+        Generate a machine-readable data block to append after \\end{document}.
+        
+        This data is ignored by LaTeX but can be parsed by analysis scripts.
+        Contains move-by-move positional metrics for computational analysis.
+        
+        Args:
+            analysis: EnhancedGameAnalysisResult containing moves with positional data
+            game_num: Optional game number for multi-game books
+            
+        Returns:
+            String containing commented raw data in CSV-like format
+        """
+        lines = []
+        
+        # Header
+        lines.append("")
+        lines.append("% " + "=" * 70)
+        if game_num is not None:
+            lines.append(f"% RAW POSITIONAL DATA - GAME {game_num}")
+        else:
+            lines.append("% RAW POSITIONAL DATA FOR COMPUTATIONAL ANALYSIS")
+        lines.append("% " + "=" * 70)
+        lines.append("%")
+        lines.append(f"% White: {analysis.white}")
+        lines.append(f"% Black: {analysis.black}")
+        lines.append(f"% Event: {analysis.event}")
+        lines.append(f"% Date: {analysis.date}")
+        lines.append(f"% Result: {analysis.result}")
+        lines.append("%")
+        lines.append("% Format: ply, SAN, eval_cp, space_w, space_b, mob_w, mob_b, ks_w, ks_b, threats_w, threats_b")
+        lines.append("% Units: eval in centipawns (from White's perspective), others in Stockfish classical eval units")
+        lines.append("%")
+        lines.append("% GAME_DATA_START")
+        
+        for move in analysis.moves:
+            pe = move.positional_eval
+            
+            # Handle None values and format the data
+            eval_cp = int(move.eval_after) if move.eval_after is not None else "None"
+            
+            if pe is not None:
+                space_w = f"{pe.space_white:.3f}"
+                space_b = f"{pe.space_black:.3f}"
+                mob_w = f"{pe.mobility_white_mg:.3f}"
+                mob_b = f"{pe.mobility_black_mg:.3f}"
+                ks_w = f"{pe.king_safety_white:.3f}"
+                ks_b = f"{pe.king_safety_black:.3f}"
+                threats_w = f"{pe.threats_white:.3f}"
+                threats_b = f"{pe.threats_black:.3f}"
+            else:
+                space_w = space_b = mob_w = mob_b = "None"
+                ks_w = ks_b = threats_w = threats_b = "None"
+            
+            # Escape any commas in SAN (shouldn't happen, but be safe)
+            san = move.move_san.replace(",", ";")
+            
+            line = f"% {move.ply}, {san}, {eval_cp}, {space_w}, {space_b}, {mob_w}, {mob_b}, {ks_w}, {ks_b}, {threats_w}, {threats_b}"
+            lines.append(line)
+        
+        lines.append("% GAME_DATA_END")
+        lines.append("")
+        
+        return "\n".join(lines)
+    
+    @staticmethod
     def _escape_latex(text: str) -> str:
         """Escape special LaTeX characters."""
         if not text:
@@ -1402,6 +1564,9 @@ class EnhancedLaTeXReportGenerator:
                        include_methodology: bool = True,
                        include_plots: bool = True,
                        include_ascii_plots: bool = False,
+                       include_prediction: bool = False,
+                       prediction_player_color: str = None,
+                       prediction_player_name: str = None,
                        plot_output_dir: str = None) -> str:
         """
         Generate a complete LaTeX report with positional analysis.
@@ -1413,6 +1578,9 @@ class EnhancedLaTeXReportGenerator:
             include_methodology: Include explanation of how metrics are computed
             include_plots: Include matplotlib plots (requires matplotlib)
             include_ascii_plots: Include ASCII plots in verbatim environment
+            include_prediction: Include Fireteam Index prediction section
+            prediction_player_color: "W" or "B" - which player to analyze (required if include_prediction=True)
+            prediction_player_name: Optional display name (e.g., "Berliner")
             plot_output_dir: Directory to save plot files (defaults to current dir)
             
         Returns:
@@ -1638,7 +1806,16 @@ class EnhancedLaTeXReportGenerator:
         # Critical Positions with Positional Data
         if include_diagrams and analysis.critical_positions:
             lines.extend([
-                r"\section{Critical Positions}\par This section lists the positions with the biggest evaluation swing ($\bigstar$) and those with evaluation jump $>100$ (if any).",
+                r"\section{Critical Positions}",
+                r"",
+                r"This section highlights critical moments where the evaluation shifted substantially---either due to errors or missed opportunities. Each diagram shows the position \emph{after} the move was played.",
+                r"",
+                r"\begin{itemize}",
+                r"\item \textbf{Instead of [move]}: The move(s) that should have been played instead.",
+                r"\item \textbf{Best continuation}: The optimal sequence of moves from the diagrammed position.",
+                r"\end{itemize}",
+                r"",
+                r"Positions marked with {\color{blue}$\bigstar$} represent the biggest evaluation swings in the game. The positional metrics table summarizes the spatial control, piece activity, king safety, and tactical threats for each side.",
                 r"",
             ])
             
@@ -1684,11 +1861,33 @@ class EnhancedLaTeXReportGenerator:
                         r"",
                     ])
                 
+                # Add "Instead of" moves: best move + alternatives (if different from played move)
+                instead_moves = []
+                if pos.best_move_san and pos.best_move_san != pos.move_san:
+                    instead_moves.append(esc(pos.best_move_san))
+                for alt_san, alt_eval in pos.alternative_moves[:2]:  # Add up to 2 more alternatives
+                    if alt_san != pos.move_san and esc(alt_san) not in instead_moves:
+                        instead_moves.append(esc(alt_san))
+                if instead_moves:
+                    instead_str = ", ".join(instead_moves[:3])  # Cap at 3 total
+                    lines.append(rf"Instead of {esc(pos.move_san)}: \hspace{{0.5em}} {instead_str}\hspace{{4em}}")
+                
                 if pos.best_continuation:
                     cont_str = " ".join(esc(m) for m in pos.best_continuation[:5])
-                    lines.append(rf"Best continuation: {cont_str}")
+                    lines.append(rf"\hspace{{0.5em}}Best continuation: {cont_str}")
                 
                 lines.append(r"")
+        
+        # Fireteam Index Prediction Section (if requested)
+        if include_prediction and prediction_player_color:
+            prediction_lines = EnhancedLaTeXReportGenerator._generate_prediction_section(
+                analysis,
+                player_color=prediction_player_color,
+                player_name=prediction_player_name,
+                include_plots=include_plots,
+                plot_output_dir=plot_output_dir
+            )
+            lines.extend(prediction_lines)
         
         # Analysis Metadata
         lines.extend([
@@ -1697,11 +1896,15 @@ class EnhancedLaTeXReportGenerator:
             rf"\item Engine: {esc(analysis.engine_version)}",
             rf"\item Depth: {analysis.analysis_depth}",
             rf"\item Analysis time: {analysis.analysis_time:.1f} seconds",
-            r"\item Positional metrics extracted from classical evaluation",
             r"\end{itemize}",
             r"",
             r"\end{document}",
         ])
+        
+        # Append raw positional data after \end{document}
+        # This is ignored by LaTeX but can be parsed by analysis scripts
+        raw_data_block = EnhancedLaTeXReportGenerator.generate_raw_data_block(analysis)
+        lines.append(raw_data_block)
         
         return "\n".join(lines)
     
@@ -1926,6 +2129,288 @@ class EnhancedLaTeXReportGenerator:
         return lines
     
     @staticmethod
+    def _generate_prediction_section(
+        analysis: EnhancedGameAnalysisResult,
+        player_color: str,
+        player_name: Optional[str] = None,
+        include_plots: bool = True,
+        plot_output_dir: str = "."
+    ) -> List[str]:
+        """
+        Generate the Fireteam Index prediction section.
+        
+        This section shows:
+        - The Fireteam Index formula and parameters
+        - Predictions from both per-ply and windowed algorithms
+        - Plots of FT over time (raw and smoothed)
+        """
+        esc = EnhancedLaTeXReportGenerator._escape_latex
+        lines = []
+        
+        # Extract positional data from analysis
+        data = compute_fireteam_index_for_analysis(analysis)
+        
+        if not data:
+            lines.extend([
+                r"\section{Fireteam Index Prediction}",
+                r"",
+                r"Insufficient positional data available for prediction analysis.",
+                r"",
+            ])
+            return lines
+        
+        # Run both prediction algorithms
+        result_per_ply = predict_outcome_per_ply(
+            data, 
+            player_color=player_color,
+            player_name=player_name
+        )
+        result_windowed = predict_outcome_windowed(
+            data,
+            player_color=player_color,
+            player_name=player_name
+        )
+        
+        # Determine player display name
+        if player_name:
+            display_name = esc(player_name)
+        elif player_color.upper() == "W":
+            display_name = esc(analysis.white)
+        else:
+            display_name = esc(analysis.black)
+        
+        color_word = "White" if player_color.upper() == "W" else "Black"
+        
+        lines.extend([
+            r"\section{Fireteam Index Prediction}",
+            r"",
+            r"The \textbf{Fireteam Index} is inspired by Rithmomachia's ``well-coordinated fireteam "
+            r"in enemy territory'' victory condition. It combines four positional factors into a "
+            r"single metric that predicts which side is likely to win.",
+            r"",
+            r"\subsection{The Fireteam Index Formula}",
+            r"",
+            r"\[",
+            r"\text{FT} = \Delta\text{Space} + \Delta\text{Mobility} + \Delta\text{King Safety} "
+            r"+ \frac{\Delta\text{Threats}}{10}",
+            r"\]",
+            r"",
+            r"where each $\Delta$ represents (Player's value $-$ Opponent's value). "
+            r"A positive FT indicates the player has assembled a well-coordinated position "
+            r"with territorial control, piece activity, and active pressure.",
+            r"",
+            rf"\subsection{{Prediction for {display_name} ({color_word})}}",
+            r"",
+            r"\paragraph{Algorithm Parameters.}",
+            r"\begin{itemize}",
+            r"\item Opening cutoff: ply 16 (first 8 moves ignored)",
+            r"\item Streak length: 10 plies (5 full moves required)",
+            r"\item Margin ($\epsilon$): 0.0 (any positive advantage counts)",
+            r"\item Weights: Space=1.0, Mobility=1.0, King Safety=1.0, Threats=0.1",
+            r"\end{itemize}",
+            r"",
+        ])
+        
+        # Per-ply results
+        lines.extend([
+            r"\paragraph{Per-Ply Algorithm (Raw).}",
+            r"This algorithm looks for 10 consecutive plies where the raw Fireteam Index exceeds zero.",
+            r"",
+            r"\begin{tabular}{ll}",
+            rf"\textbf{{Prediction}} & \textbf{{{result_per_ply.prediction}}} \\",
+        ])
+        
+        if result_per_ply.threshold_crossed_ply:
+            lines.append(rf"Threshold crossed at & ply {result_per_ply.threshold_crossed_ply} \\")
+        
+        lines.extend([
+            rf"Maximum streak & {result_per_ply.max_streak} plies",
+        ])
+        
+        if result_per_ply.max_streak_start_ply:
+            lines.append(rf" (starting ply {result_per_ply.max_streak_start_ply}) \\")
+        else:
+            lines.append(r" \\")
+        
+        lines.extend([
+            rf"Peak FT value & {result_per_ply.peak_ft_value:+.3f}",
+        ])
+        
+        if result_per_ply.peak_ft_ply:
+            lines.append(rf" (ply {result_per_ply.peak_ft_ply}) \\")
+        else:
+            lines.append(r" \\")
+        
+        lines.extend([
+            r"\end{tabular}",
+            r"",
+        ])
+        
+        # Windowed results
+        lines.extend([
+            r"\paragraph{Windowed Algorithm (Smoothed).}",
+            r"This algorithm uses a 10-ply rolling average to smooth noise, then looks for "
+            r"10 consecutive plies where the smoothed FT exceeds zero.",
+            r"",
+            r"\begin{tabular}{ll}",
+            rf"\textbf{{Prediction}} & \textbf{{{result_windowed.prediction}}} \\",
+        ])
+        
+        if result_windowed.threshold_crossed_ply:
+            lines.append(rf"Threshold crossed at & ply {result_windowed.threshold_crossed_ply} \\")
+        
+        lines.extend([
+            rf"Maximum streak & {result_windowed.max_streak} plies",
+        ])
+        
+        if result_windowed.max_streak_start_ply:
+            lines.append(rf" (starting ply {result_windowed.max_streak_start_ply}) \\")
+        else:
+            lines.append(r" \\")
+        
+        lines.extend([
+            rf"Peak smoothed FT & {result_windowed.peak_ft_value:+.3f}",
+        ])
+        
+        if result_windowed.peak_ft_ply:
+            lines.append(rf" (ply {result_windowed.peak_ft_ply}) \\")
+        else:
+            lines.append(r" \\")
+        
+        lines.extend([
+            r"\end{tabular}",
+            r"",
+        ])
+        
+        # Generate FT plots if requested
+        if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available():
+            try:
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                
+                # Create figure with two subplots
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+                
+                # Per-ply plot
+                if result_per_ply.ft_values:
+                    plies = [p for p, _ in result_per_ply.ft_values]
+                    ft_vals = [v for _, v in result_per_ply.ft_values]
+                    
+                    ax1.plot(plies, ft_vals, 'b-', linewidth=1.0, label='Fireteam Index')
+                    ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+                    ax1.fill_between(plies, ft_vals, 0, 
+                                    where=[v > 0 for v in ft_vals],
+                                    alpha=0.3, color='green', label='Positive')
+                    ax1.fill_between(plies, ft_vals, 0,
+                                    where=[v <= 0 for v in ft_vals],
+                                    alpha=0.3, color='red', label='Negative')
+                    ax1.set_xlabel('Ply')
+                    ax1.set_ylabel(f'FT ({display_name})')
+                    ax1.set_title(f'Per-Ply Fireteam Index (Raw)')
+                    ax1.legend(loc='best')
+                    ax1.grid(True, alpha=0.3)
+                
+                # Windowed plot
+                if result_windowed.ft_values:
+                    plies_w = [p for p, _ in result_windowed.ft_values]
+                    ft_vals_w = [v for _, v in result_windowed.ft_values]
+                    
+                    ax2.plot(plies_w, ft_vals_w, 'b-', linewidth=1.5, label='Smoothed FT (10-ply window)')
+                    ax2.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+                    ax2.fill_between(plies_w, ft_vals_w, 0,
+                                    where=[v > 0 for v in ft_vals_w],
+                                    alpha=0.3, color='green', label='Positive')
+                    ax2.fill_between(plies_w, ft_vals_w, 0,
+                                    where=[v <= 0 for v in ft_vals_w],
+                                    alpha=0.3, color='red', label='Negative')
+                    ax2.set_xlabel('Ply')
+                    ax2.set_ylabel(f'FT ({display_name})')
+                    ax2.set_title(f'Windowed Fireteam Index (Smoothed)')
+                    ax2.legend(loc='best')
+                    ax2.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                
+                # Save plot
+                ft_plot_path = os.path.join(plot_output_dir, 'plot_fireteam_index.pdf')
+                plt.savefig(ft_plot_path, format='pdf', bbox_inches='tight')
+                plt.close()
+                
+                lines.extend([
+                    r"\subsection{Fireteam Index Over Time}",
+                    r"",
+                    r"The plots below show the Fireteam Index evolution throughout the game. "
+                    r"Green shading indicates positive (favorable) values; red indicates negative.",
+                    r"",
+                    r"\begin{center}",
+                    rf"\includegraphics[width=0.95\textwidth]{{{ft_plot_path}}}",
+                    r"\end{center}",
+                    r"",
+                ])
+                
+            except Exception as e:
+                lines.extend([
+                    r"\subsection{Fireteam Index Over Time}",
+                    r"",
+                    rf"(Plot generation failed: {esc(str(e))})",
+                    r"",
+                ])
+        
+        # Add interpretation
+        lines.extend([
+            r"\subsection{Interpretation}",
+            r"",
+        ])
+        
+        # Determine actual result for comparison
+        actual_result = analysis.result
+        player_won = (player_color.upper() == "W" and actual_result == "1-0") or \
+                    (player_color.upper() == "B" and actual_result == "0-1")
+        was_draw = actual_result == "1/2-1/2"
+        
+        if was_draw:
+            actual_outcome = "DRAW"
+        elif player_won:
+            actual_outcome = "WIN"
+        else:
+            actual_outcome = "LOSS"
+        
+        per_ply_correct = (result_per_ply.prediction == "WIN" and player_won) or \
+                         (result_per_ply.prediction == "DRAW" and (was_draw or not player_won))
+        windowed_correct = (result_windowed.prediction == "WIN" and player_won) or \
+                          (result_windowed.prediction == "DRAW" and (was_draw or not player_won))
+        
+        lines.extend([
+            rf"Actual game result: \textbf{{{esc(actual_result)}}} ",
+            rf"({display_name}'s outcome: \textbf{{{actual_outcome}}})",
+            r"",
+            r"\begin{itemize}",
+            rf"\item Per-ply prediction: {result_per_ply.prediction} --- ",
+        ])
+        
+        if per_ply_correct:
+            lines.append(r"\textcolor{green}{$\checkmark$ Correct}")
+        else:
+            lines.append(r"\textcolor{red}{$\times$ Incorrect}")
+        
+        lines.extend([
+            rf"\item Windowed prediction: {result_windowed.prediction} --- ",
+        ])
+        
+        if windowed_correct:
+            lines.append(r"\textcolor{green}{$\checkmark$ Correct}")
+        else:
+            lines.append(r"\textcolor{red}{$\times$ Incorrect}")
+        
+        lines.extend([
+            r"\end{itemize}",
+            r"",
+        ])
+        
+        return lines
+    
+    @staticmethod
     def _generate_methodology_section() -> List[str]:
         """Generate explanation of how Stockfish computes positional metrics."""
         return [
@@ -2018,6 +2503,63 @@ class EnhancedLaTeXReportGenerator:
             r'``tactical seesaw battle" indicates significant evaluation swings ($3 \le d < 6$) with the '
             r"advantage changing hands multiple times.",
             r"",
+            r"\subsection{Fireteam Index (FTI) and Win Prediction}",
+            r"",
+            r"The Fireteam Index is a composite metric inspired by the ancient mathematical board game "
+            r"\textit{Rithmomachia}, where a ``progression victory'' is achieved when a coordinated group "
+            r"of pieces (a ``fireteam'') establishes control deep in enemy territory. Similarly, in chess, "
+            r"sustained positional dominance across multiple factors often precedes victory.",
+            r"",
+            r"\paragraph{Formula.} The Fireteam Index combines the four positional metrics into a single value "
+            r"measuring overall positional advantage from a given player's perspective:",
+            r"",
+            r"\begin{equation}",
+            r"\text{FT} = \Delta\text{Space} + \Delta\text{Mobility} + \Delta\text{King Safety} + \frac{\Delta\text{Threats}}{10}",
+            r"\end{equation}",
+            r"",
+            r"where each $\Delta$ represents (Player's value $-$ Opponent's value). Positive FT indicates "
+            r"the player has overall positional superiority; negative indicates the opponent is better.",
+            r"",
+            r"The Threats component is divided by 10 because its raw values are typically an order of magnitude "
+            r"larger than the other metrics, and empirical testing showed this weighting provides better "
+            r"predictive accuracy.",
+            r"",
+            r"\paragraph{Prediction Algorithms.} Two algorithms are used to predict game outcomes based on FT:",
+            r"",
+            r"\begin{enumerate}",
+            r"\item \textbf{Per-Ply (Raw)}: Examines the raw FT value at each ply after the opening phase "
+            r"(ply 16, approximately 8 moves). If FT exceeds zero for 10 consecutive plies (5 full moves), "
+            r"a WIN is predicted for that player.",
+            r"",
+            r"\item \textbf{Windowed (Smoothed)}: Computes a 10-ply rolling average of FT before applying "
+            r"the same streak detection. This smooths out tactical noise and captures sustained trends "
+            r"rather than momentary fluctuations.",
+            r"\end{enumerate}",
+            r"",
+            r"Both algorithms predict DRAW if no player achieves the required streak of positional dominance.",
+            r"",
+            r"\paragraph{Interpretation.} The FT prediction measures \emph{positional} dominance, which is a "
+            r"necessary but not sufficient condition for winning. A player may dominate positionally yet fail "
+            r"to convert due to:",
+            r"\begin{itemize}",
+            r"\item Tactical errors (blunders, missed combinations)",
+            r"\item Time pressure in rapid/blitz games",
+            r"\item Tenacious defense by the opponent",
+            r"\item Drawing tendencies in certain structures (opposite-colored bishops, fortresses)",
+            r"\end{itemize}",
+            r"",
+            r"Conversely, a player may win without ever achieving sustained FT dominance through a single "
+            r"tactical strike or opponent error. The FT metric is most predictive in games where positional "
+            r"understanding---rather than pure calculation---determines the outcome.",
+            r"",
+            r"\paragraph{For Draws.} When analyzing drawn games, the FT is computed from both players' "
+            r"perspectives. This reveals whether:",
+            r"\begin{itemize}",
+            r"\item Neither side achieved dominance (a ``true draw'' with balanced play)",
+            r"\item One side dominated but failed to convert (a ``missed win'')",
+            r"\item Both sides dominated at different points (a ``mutual chances draw'')",
+            r"\end{itemize}",
+            r"",
         ]
 
     @staticmethod
@@ -2029,7 +2571,11 @@ class EnhancedLaTeXReportGenerator:
                              include_methodology: bool = True,
                              include_plots: bool = True,
                              include_ascii_plots: bool = False,
-                             plot_output_dir: str = None) -> str:
+                             include_prediction: bool = True,
+                             prediction_name: str = None,
+                             prediction_winner: bool = True,
+                             plot_output_dir: str = None,
+                             verbose: bool = False) -> str:
         """
         Generate a LaTeX book with multiple games as chapters.
         
@@ -2042,7 +2588,11 @@ class EnhancedLaTeXReportGenerator:
             include_methodology: Include methodology explanation (once, as appendix)
             include_plots: Include matplotlib plots (requires matplotlib)
             include_ascii_plots: Include ASCII plots in verbatim environment
+            include_prediction: Include Fireteam Index prediction sections
+            prediction_name: Track specific player by name (e.g., "Berliner")
+            prediction_winner: If True (default), track winner in decisive games
             plot_output_dir: Directory to save plot files (defaults to current dir)
+            verbose: Print warnings to console
             
         Returns:
             Complete LaTeX book document as string
@@ -2056,6 +2606,19 @@ class EnhancedLaTeXReportGenerator:
         # Set plot output directory
         if plot_output_dir is None:
             plot_output_dir = "."
+        
+        # Check if prediction_name matches any games
+        name_matched_any = False
+        if prediction_name and include_prediction:
+            for analysis in analyses:
+                if prediction_name.lower() in analysis.white.lower() or \
+                   prediction_name.lower() in analysis.black.lower():
+                    name_matched_any = True
+                    break
+            
+            if not name_matched_any and verbose:
+                print(f"WARNING: prediction_name '{prediction_name}' did not match any player "
+                      f"in the {len(analyses)} games. Falling back to --prediction-winner mode.")
         
         # Determine author
         if author is None:
@@ -2097,8 +2660,50 @@ class EnhancedLaTeXReportGenerator:
             r"",
         ])
         
+        # Track prediction statistics for summary
+        prediction_stats = {
+            'total_games': len(analyses),
+            'decisive_games': 0,
+            'draws': 0,
+            'per_ply_correct': 0,
+            'windowed_correct': 0,
+            'games_with_prediction': 0,
+        }
+        
         # Generate each game as a chapter
         for game_num, analysis in enumerate(analyses, 1):
+            # Determine prediction player for this game
+            game_prediction_color = None
+            game_prediction_name = None
+            is_draw = analysis.result == "1/2-1/2" or analysis.result == "1/2"
+            
+            if include_prediction:
+                # First, try to match prediction_name
+                if prediction_name and name_matched_any:
+                    if prediction_name.lower() in analysis.white.lower():
+                        game_prediction_color = 'W'
+                        game_prediction_name = prediction_name
+                    elif prediction_name.lower() in analysis.black.lower():
+                        game_prediction_color = 'B'
+                        game_prediction_name = prediction_name
+                
+                # If no name match, fall back to prediction_winner for decisive games
+                # or analyze both sides for draws
+                if game_prediction_color is None and prediction_winner:
+                    if analysis.result == "1-0":
+                        game_prediction_color = 'W'
+                        game_prediction_name = analysis.white
+                        prediction_stats['decisive_games'] += 1
+                    elif analysis.result == "0-1":
+                        game_prediction_color = 'B'
+                        game_prediction_name = analysis.black
+                        prediction_stats['decisive_games'] += 1
+                    elif is_draw:
+                        # For draws, we'll use special 'BOTH' marker
+                        game_prediction_color = 'BOTH'
+                        game_prediction_name = None
+                        prediction_stats['draws'] += 1
+            
             lines.extend(EnhancedLaTeXReportGenerator._generate_game_chapter(
                 analysis,
                 game_num=game_num,
@@ -2106,8 +2711,72 @@ class EnhancedLaTeXReportGenerator:
                 include_positional=include_positional,
                 include_plots=include_plots,
                 include_ascii_plots=include_ascii_plots,
-                plot_output_dir=plot_output_dir
+                include_prediction=include_prediction and game_prediction_color is not None,
+                prediction_player_color=game_prediction_color,
+                prediction_player_name=game_prediction_name,
+                plot_output_dir=plot_output_dir,
+                prediction_stats=prediction_stats  # Pass for accumulation
             ))
+        
+        # Add Fireteam Index prediction summary chapter
+        if include_prediction and prediction_stats['games_with_prediction'] > 0:
+            lines.extend([
+                r"\chapter{Fireteam Index Prediction Summary}",
+                r"",
+                r"This chapter summarizes the accuracy of the Fireteam Index prediction algorithms "
+                r"across all games in this collection.",
+                r"",
+                r"\section{Overall Results}",
+                r"",
+                r"\begin{tabular}{lr}",
+                r"\toprule",
+                r"\textbf{Metric} & \textbf{Value} \\",
+                r"\midrule",
+                rf"Total games & {prediction_stats['total_games']} \\",
+                rf"Decisive games & {prediction_stats['decisive_games']} \\",
+                rf"Draws (both sides analyzed) & {prediction_stats['draws']} \\",
+                rf"Games with prediction & {prediction_stats['games_with_prediction']} \\",
+                r"\midrule",
+            ])
+            
+            if prediction_stats['games_with_prediction'] > 0:
+                pp_acc = 100 * prediction_stats['per_ply_correct'] / prediction_stats['games_with_prediction']
+                w_acc = 100 * prediction_stats['windowed_correct'] / prediction_stats['games_with_prediction']
+                lines.extend([
+                    rf"Per-ply correct & {prediction_stats['per_ply_correct']}/{prediction_stats['games_with_prediction']} ({pp_acc:.1f}\%) \\",
+                    rf"Windowed correct & {prediction_stats['windowed_correct']}/{prediction_stats['games_with_prediction']} ({w_acc:.1f}\%) \\",
+                ])
+            
+            lines.extend([
+                r"\bottomrule",
+                r"\end{tabular}",
+                r"",
+            ])
+            
+            # Add interpretation
+            if prediction_stats['games_with_prediction'] > 0:
+                lines.extend([
+                    r"\section{Interpretation}",
+                    r"",
+                ])
+                
+                if prediction_name and name_matched_any:
+                    lines.append(
+                        rf"These predictions tracked \textbf{{{esc(prediction_name)}}} across all games where they appeared. "
+                    )
+                else:
+                    lines.append(
+                        r"These predictions tracked the eventual winner in each decisive game. "
+                    )
+                
+                lines.extend([
+                    r"A ``WIN'' prediction means the Fireteam Index exceeded the threshold for the required "
+                    r"number of consecutive plies, indicating sustained positional dominance.",
+                    r"",
+                    r"The per-ply algorithm uses raw positional deltas, while the windowed algorithm "
+                    r"smooths values over a 10-ply (5 full move) rolling average to reduce noise.",
+                    r"",
+                ])
         
         # Add methodology as appendix (once for all games)
         if include_methodology:
@@ -2133,6 +2802,18 @@ class EnhancedLaTeXReportGenerator:
             r"\end{document}",
         ])
         
+        # Append raw positional data for all games after \end{document}
+        # This is ignored by LaTeX but can be parsed by analysis scripts
+        lines.append("")
+        lines.append("% " + "=" * 70)
+        lines.append("% RAW POSITIONAL DATA FOR ALL GAMES")
+        lines.append("% " + "=" * 70)
+        for game_num, analysis in enumerate(analyses, 1):
+            raw_data_block = EnhancedLaTeXReportGenerator.generate_raw_data_block(
+                analysis, game_num=game_num
+            )
+            lines.append(raw_data_block)
+        
         return "\n".join(lines)
     
     @staticmethod
@@ -2142,7 +2823,11 @@ class EnhancedLaTeXReportGenerator:
                                include_positional: bool = True,
                                include_plots: bool = True,
                                include_ascii_plots: bool = False,
-                               plot_output_dir: str = ".") -> List[str]:
+                               include_prediction: bool = False,
+                               prediction_player_color: str = None,
+                               prediction_player_name: str = None,
+                               plot_output_dir: str = ".",
+                               prediction_stats: Dict = None) -> List[str]:
         """Generate a chapter for a single game in the book."""
         esc = EnhancedLaTeXReportGenerator._escape_latex
         lines = []
@@ -2312,6 +2997,15 @@ class EnhancedLaTeXReportGenerator:
             lines.extend([
                 r"\section{Critical Positions}",
                 r"",
+                r"This section highlights critical moments where the evaluation shifted substantially---either due to errors or missed opportunities. Each diagram shows the position \emph{after} the move was played.",
+                r"",
+                r"\begin{itemize}",
+                r"\item \textbf{Instead of [move]}: The move(s) that should have been played instead.",
+                r"\item \textbf{Best continuation}: The optimal sequence of moves from the diagrammed position.",
+                r"\end{itemize}",
+                r"",
+                r"Positions marked with {\color{blue}$\bigstar$} represent the biggest evaluation swings in the game. The positional metrics table summarizes the spatial control, piece activity, king safety, and tactical threats for each side.",
+                r"",
             ])
             
             for i, pos in enumerate(analysis.critical_positions, 1):
@@ -2354,11 +3048,35 @@ class EnhancedLaTeXReportGenerator:
                         r"",
                     ])
                 
+                # Add "Instead of" moves: best move + alternatives (if different from played move)
+                instead_moves = []
+                if pos.best_move_san and pos.best_move_san != pos.move_san:
+                    instead_moves.append(esc(pos.best_move_san))
+                for alt_san, alt_eval in pos.alternative_moves[:2]:  # Add up to 2 more alternatives
+                    if alt_san != pos.move_san and esc(alt_san) not in instead_moves:
+                        instead_moves.append(esc(alt_san))
+                if instead_moves:
+                    instead_str = ", ".join(instead_moves[:3])  # Cap at 3 total
+                    lines.append(rf"Instead of {esc(pos.move_san)}: \hspace{{0.5em}} {instead_str}\hspace{{4em}}")
+                
                 if pos.best_continuation:
                     cont_str = " ".join(esc(m) for m in pos.best_continuation[:5])
-                    lines.append(rf"Best continuation: {cont_str}")
+                    lines.append(rf"\hspace{{0.5em}}Best continuation: {cont_str}")
                 
                 lines.append(r"")
+        
+        # Fireteam Index Prediction Section (if requested)
+        if include_prediction and prediction_player_color:
+            prediction_lines = EnhancedLaTeXReportGenerator._generate_prediction_section_for_book(
+                analysis,
+                game_num=game_num,
+                player_color=prediction_player_color,
+                player_name=prediction_player_name,
+                include_plots=include_plots,
+                plot_output_dir=plot_output_dir,
+                prediction_stats=prediction_stats
+            )
+            lines.extend(prediction_lines)
         
         # Analysis Metadata for this game
         lines.extend([
@@ -2535,6 +3253,322 @@ class EnhancedLaTeXReportGenerator:
                     r"\begin{center}",
                     rf"\includegraphics[width=0.9\textwidth]{{{plot_files['threats']}}}",
                     r"\end{center}",
+                    r"",
+                ])
+        
+        return lines
+
+    @staticmethod
+    def _generate_prediction_section_for_book(
+        analysis: EnhancedGameAnalysisResult,
+        game_num: int,
+        player_color: str,
+        player_name: Optional[str] = None,
+        include_plots: bool = True,
+        plot_output_dir: str = ".",
+        prediction_stats: Dict = None
+    ) -> List[str]:
+        """
+        Generate the Fireteam Index prediction section for a book chapter.
+        
+        This is a condensed version of _generate_prediction_section for use in books.
+        For draws (player_color='BOTH'), analyzes from both perspectives.
+        """
+        esc = EnhancedLaTeXReportGenerator._escape_latex
+        lines = []
+        
+        # Extract positional data from analysis
+        data = compute_fireteam_index_for_analysis(analysis)
+        
+        if not data:
+            return lines
+        
+        # Check if this is a draw requiring dual analysis
+        is_draw_dual = player_color == 'BOTH'
+        was_draw = analysis.result in ("1/2-1/2", "1/2")
+        
+        if is_draw_dual:
+            # Analyze from both perspectives for draws
+            lines.extend([
+                r"\section{Fireteam Index Prediction}",
+                r"",
+                r"\textit{This game ended in a draw. The Fireteam Index is analyzed from both players' "
+                r"perspectives to determine whether either side achieved sustained positional dominance "
+                r"that might have predicted a win.}",
+                r"",
+            ])
+            
+            # Run predictions for both sides
+            result_white_pp = predict_outcome_per_ply(data, player_color='W')
+            result_white_w = predict_outcome_windowed(data, player_color='W')
+            result_black_pp = predict_outcome_per_ply(data, player_color='B')
+            result_black_w = predict_outcome_windowed(data, player_color='B')
+            
+            white_name = esc(analysis.white)
+            black_name = esc(analysis.black)
+            
+            # Results table for both players
+            lines.extend([
+                r"\begin{tabular}{llcc}",
+                r"\toprule",
+                r"\textbf{Player} & \textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak} \\",
+                r"\midrule",
+                rf"{white_name} & Per-ply & {result_white_pp.prediction} & {result_white_pp.max_streak} plies \\",
+                rf"{white_name} & Windowed & {result_white_w.prediction} & {result_white_w.max_streak} plies \\",
+                r"\midrule",
+                rf"{black_name} & Per-ply & {result_black_pp.prediction} & {result_black_pp.max_streak} plies \\",
+                rf"{black_name} & Windowed & {result_black_w.prediction} & {result_black_w.max_streak} plies \\",
+                r"\bottomrule",
+                r"\end{tabular}",
+                r"",
+            ])
+            
+            # Interpretation for draws
+            white_predicted_win = result_white_pp.prediction == "WIN" or result_white_w.prediction == "WIN"
+            black_predicted_win = result_black_pp.prediction == "WIN" or result_black_w.prediction == "WIN"
+            
+            lines.append(r"\paragraph{Interpretation.}")
+            if white_predicted_win and black_predicted_win:
+                lines.append(
+                    r"Both players achieved sustained positional dominance at different points in the game. "
+                    r"The FT Index predicted wins for both sides, reflecting a hard-fought battle where "
+                    r"momentum shifted. The draw is a reasonable outcome given the mutual winning chances."
+                )
+                # For stats: if both predicted WIN, we count this as "neither fully correct"
+                # but it's a reasonable draw
+                if prediction_stats is not None:
+                    prediction_stats['games_with_prediction'] += 1
+                    # Neither side's WIN prediction was correct (it was a draw)
+            elif white_predicted_win:
+                lines.append(
+                    rf"White ({white_name}) achieved sustained positional dominance, with the FT Index "
+                    r"predicting a win. However, the game ended in a draw, suggesting Black successfully "
+                    r"defended or White failed to convert the advantage."
+                )
+                if prediction_stats is not None:
+                    prediction_stats['games_with_prediction'] += 1
+                    # White's WIN prediction was incorrect
+            elif black_predicted_win:
+                lines.append(
+                    rf"Black ({black_name}) achieved sustained positional dominance, with the FT Index "
+                    r"predicting a win. However, the game ended in a draw, suggesting White successfully "
+                    r"defended or Black failed to convert the advantage."
+                )
+                if prediction_stats is not None:
+                    prediction_stats['games_with_prediction'] += 1
+                    # Black's WIN prediction was incorrect
+            else:
+                lines.append(
+                    r"Neither player achieved sustained positional dominance according to the FT Index. "
+                    r"Both algorithms predicted DRAW for both sides, which matches the actual result. "
+                    r"This suggests a balanced game where neither side established lasting control."
+                )
+                if prediction_stats is not None:
+                    prediction_stats['games_with_prediction'] += 1
+                    prediction_stats['per_ply_correct'] += 1
+                    prediction_stats['windowed_correct'] += 1
+            
+            lines.append(r"")
+            
+            # Generate dual FT plot if requested
+            if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available():
+                try:
+                    import matplotlib
+                    matplotlib.use('Agg')
+                    import matplotlib.pyplot as plt
+                    
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+                    
+                    # White's perspective
+                    if result_white_w.ft_values:
+                        plies_w = [p for p, _ in result_white_w.ft_values]
+                        ft_vals_w = [v for _, v in result_white_w.ft_values]
+                        ax1.plot(plies_w, ft_vals_w, 'b-', linewidth=2.0)
+                        ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+                        ax1.fill_between(plies_w, ft_vals_w, 0,
+                                        where=[v > 0 for v in ft_vals_w],
+                                        alpha=0.3, color='green')
+                        ax1.fill_between(plies_w, ft_vals_w, 0,
+                                        where=[v <= 0 for v in ft_vals_w],
+                                        alpha=0.3, color='red')
+                    ax1.set_xlabel('Ply')
+                    ax1.set_ylabel('Fireteam Index')
+                    ax1.set_title(f"White's Perspective ({analysis.white})")
+                    ax1.grid(True, alpha=0.3)
+                    
+                    # Black's perspective
+                    if result_black_w.ft_values:
+                        plies_b = [p for p, _ in result_black_w.ft_values]
+                        ft_vals_b = [v for _, v in result_black_w.ft_values]
+                        ax2.plot(plies_b, ft_vals_b, 'b-', linewidth=2.0)
+                        ax2.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+                        ax2.fill_between(plies_b, ft_vals_b, 0,
+                                        where=[v > 0 for v in ft_vals_b],
+                                        alpha=0.3, color='green')
+                        ax2.fill_between(plies_b, ft_vals_b, 0,
+                                        where=[v <= 0 for v in ft_vals_b],
+                                        alpha=0.3, color='red')
+                    ax2.set_xlabel('Ply')
+                    ax2.set_ylabel('Fireteam Index')
+                    ax2.set_title(f"Black's Perspective ({analysis.black})")
+                    ax2.grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    
+                    ft_plot_path = os.path.join(plot_output_dir, f'plot_fireteam_g{game_num}_dual.pdf')
+                    plt.savefig(ft_plot_path, format='pdf', bbox_inches='tight')
+                    plt.close()
+                    
+                    lines.extend([
+                        r"\begin{center}",
+                        rf"\includegraphics[width=0.95\textwidth]{{{ft_plot_path}}}",
+                        r"\end{center}",
+                        r"",
+                    ])
+                    
+                except Exception as e:
+                    lines.extend([
+                        rf"(Plot generation failed: {esc(str(e))})",
+                        r"",
+                    ])
+            
+            return lines
+        
+        # Standard single-player analysis (non-draw or specific player requested)
+        result_per_ply = predict_outcome_per_ply(
+            data, 
+            player_color=player_color,
+            player_name=player_name
+        )
+        result_windowed = predict_outcome_windowed(
+            data,
+            player_color=player_color,
+            player_name=player_name
+        )
+        
+        # Determine player display name
+        if player_name:
+            display_name = esc(player_name)
+        elif player_color.upper() == "W":
+            display_name = esc(analysis.white)
+        else:
+            display_name = esc(analysis.black)
+        
+        color_word = "White" if player_color.upper() == "W" else "Black"
+        
+        lines.extend([
+            r"\section{Fireteam Index Prediction}",
+            r"",
+            rf"Tracking: \textbf{{{display_name}}} ({color_word})",
+            r"",
+        ])
+        
+        # Compact results table
+        lines.extend([
+            r"\begin{tabular}{lcc}",
+            r"\toprule",
+            r"\textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak} \\",
+            r"\midrule",
+            rf"Per-ply (raw) & {result_per_ply.prediction} & {result_per_ply.max_streak} plies \\",
+            rf"Windowed (smoothed) & {result_windowed.prediction} & {result_windowed.max_streak} plies \\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"",
+        ])
+        
+        # Determine actual result for comparison
+        actual_result = analysis.result
+        player_won = (player_color.upper() == "W" and actual_result == "1-0") or \
+                    (player_color.upper() == "B" and actual_result == "0-1")
+        
+        if was_draw:
+            actual_outcome = "DRAW"
+        elif player_won:
+            actual_outcome = "WIN"
+        else:
+            actual_outcome = "LOSS"
+        
+        per_ply_correct = (result_per_ply.prediction == "WIN" and player_won) or \
+                         (result_per_ply.prediction == "DRAW" and (was_draw or not player_won))
+        windowed_correct = (result_windowed.prediction == "WIN" and player_won) or \
+                          (result_windowed.prediction == "DRAW" and (was_draw or not player_won))
+        
+        # Update prediction stats if provided
+        if prediction_stats is not None:
+            prediction_stats['games_with_prediction'] += 1
+            if per_ply_correct:
+                prediction_stats['per_ply_correct'] += 1
+            if windowed_correct:
+                prediction_stats['windowed_correct'] += 1
+        
+        lines.extend([
+            rf"Actual result: {esc(actual_result)} ({display_name}'s outcome: {actual_outcome})",
+            r"",
+        ])
+        
+        # Correctness indicators
+        pp_mark = r"\textcolor{green}{$\checkmark$}" if per_ply_correct else r"\textcolor{red}{$\times$}"
+        w_mark = r"\textcolor{green}{$\checkmark$}" if windowed_correct else r"\textcolor{red}{$\times$}"
+        
+        lines.extend([
+            rf"Per-ply: {pp_mark} \quad Windowed: {w_mark}",
+            r"",
+        ])
+        
+        # Generate FT plot if requested
+        if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available():
+            try:
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                
+                fig, ax = plt.subplots(figsize=(8, 4))
+                
+                # Per-ply values
+                if result_per_ply.ft_values:
+                    plies = [p for p, _ in result_per_ply.ft_values]
+                    ft_vals = [v for _, v in result_per_ply.ft_values]
+                    ax.plot(plies, ft_vals, 'b-', linewidth=0.8, alpha=0.5, label='Raw FT')
+                
+                # Windowed values (thicker line)
+                if result_windowed.ft_values:
+                    plies_w = [p for p, _ in result_windowed.ft_values]
+                    ft_vals_w = [v for _, v in result_windowed.ft_values]
+                    ax.plot(plies_w, ft_vals_w, 'b-', linewidth=2.0, label='Smoothed FT')
+                
+                ax.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+                ax.fill_between(plies_w if result_windowed.ft_values else plies, 
+                               ft_vals_w if result_windowed.ft_values else ft_vals, 0,
+                               where=[v > 0 for v in (ft_vals_w if result_windowed.ft_values else ft_vals)],
+                               alpha=0.3, color='green')
+                ax.fill_between(plies_w if result_windowed.ft_values else plies,
+                               ft_vals_w if result_windowed.ft_values else ft_vals, 0,
+                               where=[v <= 0 for v in (ft_vals_w if result_windowed.ft_values else ft_vals)],
+                               alpha=0.3, color='red')
+                
+                ax.set_xlabel('Ply')
+                ax.set_ylabel(f'Fireteam Index ({display_name})')
+                ax.set_title(f'Fireteam Index Evolution')
+                ax.legend(loc='best')
+                ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                
+                # Save with game_num for uniqueness
+                ft_plot_path = os.path.join(plot_output_dir, f'plot_fireteam_g{game_num}.pdf')
+                plt.savefig(ft_plot_path, format='pdf', bbox_inches='tight')
+                plt.close()
+                
+                lines.extend([
+                    r"\begin{center}",
+                    rf"\includegraphics[width=0.85\textwidth]{{{ft_plot_path}}}",
+                    r"\end{center}",
+                    r"",
+                ])
+                
+            except Exception as e:
+                lines.extend([
+                    rf"(Plot generation failed: {esc(str(e))})",
                     r"",
                 ])
         
@@ -2935,6 +3969,486 @@ def print_diagnostics(stockfish_path: str = "/usr/games/stockfish"):
 
 
 # =============================================================================
+# RAW DATA PARSING UTILITIES
+# =============================================================================
+
+def parse_raw_positional_data(tex_filepath: str, game_num: int = None) -> List[Dict]:
+    """
+    Extract raw positional data from a CGA-generated .tex file.
+    
+    The data is stored after \\end{document} in commented lines between
+    GAME_DATA_START and GAME_DATA_END markers.
+    
+    Args:
+        tex_filepath: Path to the .tex file
+        game_num: For multi-game books, specify which game (1-indexed).
+                  If None, returns the first (or only) game's data.
+    
+    Returns:
+        List of dicts, one per half-move, with keys:
+        - ply: Half-move number
+        - san: Move in SAN notation
+        - eval_cp: Centipawn evaluation (or None)
+        - space_w, space_b: Space metrics
+        - mob_w, mob_b: Mobility metrics
+        - ks_w, ks_b: King safety metrics
+        - threats_w, threats_b: Threat metrics
+    """
+    with open(tex_filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Find all data blocks
+    import re
+    pattern = r'% GAME_DATA_START\n(.*?)% GAME_DATA_END'
+    matches = list(re.finditer(pattern, content, re.DOTALL))
+    
+    if not matches:
+        return []
+    
+    # Select which game
+    if game_num is not None:
+        if 1 <= game_num <= len(matches):
+            match = matches[game_num - 1]
+        else:
+            return []
+    else:
+        match = matches[0]
+    
+    data = []
+    for line in match.group(1).strip().split('\n'):
+        line = line.strip()
+        if not line.startswith('%'):
+            continue
+        line = line[1:].strip()  # Remove leading %
+        if not line or line.startswith('='):
+            continue
+        
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) != 11:
+            continue
+        
+        try:
+            def parse_float(s):
+                return None if s == 'None' else float(s)
+            
+            def parse_int(s):
+                return None if s == 'None' else int(s)
+            
+            data.append({
+                'ply': int(parts[0]),
+                'san': parts[1],
+                'eval_cp': parse_int(parts[2]),
+                'space_w': parse_float(parts[3]),
+                'space_b': parse_float(parts[4]),
+                'mob_w': parse_float(parts[5]),
+                'mob_b': parse_float(parts[6]),
+                'ks_w': parse_float(parts[7]),
+                'ks_b': parse_float(parts[8]),
+                'threats_w': parse_float(parts[9]),
+                'threats_b': parse_float(parts[10]),
+            })
+        except (ValueError, IndexError):
+            continue
+    
+    return data
+
+
+def compute_fireteam_index(data: List[Dict], threats_divisor: float = 10.0) -> List[Dict]:
+    """
+    Compute the Fireteam Index for each position from raw positional data.
+    
+    The Fireteam Index is inspired by Rithmomachia's "well-coordinated fireteam
+    in enemy territory" victory condition. It combines:
+    - Space advantage (territorial control)
+    - Mobility advantage (piece coordination)
+    - King safety advantage (defensive solidity)
+    - Threats advantage (active pressure, downweighted)
+    
+    Formula: FT = ΔSpace + ΔMobility + ΔKingSafety + ΔThreats/divisor
+    
+    Args:
+        data: List of dicts from parse_raw_positional_data()
+        threats_divisor: Divisor for threats term (default 10.0)
+    
+    Returns:
+        List of dicts with keys:
+        - ply: Half-move number
+        - san: Move in SAN notation
+        - eval_cp: Centipawn evaluation
+        - ft_white: Fireteam Index from White's perspective
+        - ft_black: Fireteam Index from Black's perspective
+        - components: Dict with individual component values
+    """
+    result = []
+    
+    for row in data:
+        # Skip rows with missing data
+        if any(row[k] is None for k in ['space_w', 'space_b', 'mob_w', 'mob_b', 
+                                         'ks_w', 'ks_b', 'threats_w', 'threats_b']):
+            continue
+        
+        # Compute component differences (positive = White advantage)
+        delta_space = row['space_w'] - row['space_b']
+        delta_mob = row['mob_w'] - row['mob_b']
+        delta_ks = row['ks_w'] - row['ks_b']
+        delta_threats = (row['threats_w'] - row['threats_b']) / threats_divisor
+        
+        ft_white = delta_space + delta_mob + delta_ks + delta_threats
+        
+        result.append({
+            'ply': row['ply'],
+            'san': row['san'],
+            'eval_cp': row['eval_cp'],
+            'ft_white': ft_white,
+            'ft_black': -ft_white,
+            'components': {
+                'space': delta_space,
+                'mobility': delta_mob,
+                'king_safety': delta_ks,
+                'threats': delta_threats,
+            }
+        })
+    
+    return result
+
+
+def get_game_count_in_tex(tex_filepath: str) -> int:
+    """
+    Return the number of games with raw data in a .tex file.
+    
+    Args:
+        tex_filepath: Path to the .tex file
+        
+    Returns:
+        Number of GAME_DATA blocks found
+    """
+    with open(tex_filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    import re
+    matches = re.findall(r'% GAME_DATA_START', content)
+    return len(matches)
+
+
+# =============================================================================
+# FIRETEAM INDEX PREDICTION ALGORITHMS
+# =============================================================================
+
+@dataclass
+class PredictionResult:
+    """
+    Result of a win prediction algorithm.
+    
+    Attributes:
+        prediction: "WIN" or "DRAW" (from player's perspective)
+        player_color: "W" or "B"
+        player_name: Optional name of the player being analyzed
+        threshold_crossed_ply: Ply where the streak threshold was crossed (or None)
+        max_streak: Maximum consecutive plies with positive index
+        max_streak_start_ply: Starting ply of the maximum streak
+        peak_ft_value: Maximum Fireteam Index value achieved
+        peak_ft_ply: Ply where peak value occurred
+        ft_values: List of (ply, ft_value) tuples for plotting
+        algorithm: Name of the algorithm used ("per_ply" or "windowed")
+        parameters: Dict of parameters used (cutoff, streak_length, epsilon, etc.)
+    """
+    prediction: str
+    player_color: str
+    player_name: Optional[str]
+    threshold_crossed_ply: Optional[int]
+    max_streak: int
+    max_streak_start_ply: Optional[int]
+    peak_ft_value: float
+    peak_ft_ply: Optional[int]
+    ft_values: List[Tuple[int, float]]
+    algorithm: str
+    parameters: Dict
+
+
+def predict_outcome_per_ply(
+    data: List[Dict],
+    player_color: str,
+    player_name: Optional[str] = None,
+    cutoff_ply: int = 16,
+    streak_length: int = 10,
+    epsilon: float = 0.0,
+    weights: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 0.1)
+) -> PredictionResult:
+    """
+    Predict WIN if the specified player achieves a positive Fireteam Index
+    for streak_length consecutive plies after the opening cutoff.
+    
+    This is the "per-ply" algorithm: no smoothing, just raw deltas with streak detection.
+    
+    Args:
+        data: List of dicts from parse_raw_positional_data()
+        player_color: "W" or "B" - which player's perspective to use
+        player_name: Optional name for display (e.g., "Berliner", "Caruana")
+        cutoff_ply: Ignore plies <= this value (opening phase)
+        streak_length: Number of consecutive plies required (default 10 = 5 full moves)
+        epsilon: Margin threshold; FT must be > epsilon (default 0.0)
+        weights: Tuple (w_space, w_mobility, w_king_safety, w_threats)
+                 Default (1.0, 1.0, 1.0, 0.1) - threats are downweighted
+    
+    Returns:
+        PredictionResult with prediction and diagnostic info
+    """
+    w_s, w_m, w_k, w_t = weights
+    
+    streak = 0
+    max_streak = 0
+    max_streak_start = None
+    current_streak_start = None
+    
+    threshold_crossed_ply = None
+    peak_ft = float('-inf')
+    peak_ply = None
+    ft_values = []
+    
+    for row in data:
+        ply = row['ply']
+        
+        # Skip if missing data
+        if any(row[k] is None for k in ['space_w', 'space_b', 'mob_w', 'mob_b',
+                                         'ks_w', 'ks_b', 'threats_w', 'threats_b']):
+            continue
+        
+        # Compute deltas (White - Black)
+        dS = row['space_w'] - row['space_b']
+        dM = row['mob_w'] - row['mob_b']
+        dKS = row['ks_w'] - row['ks_b']
+        dT = row['threats_w'] - row['threats_b']
+        
+        # Flip to player's perspective if Black
+        if player_color.upper() == "B":
+            dS, dM, dKS, dT = -dS, -dM, -dKS, -dT
+        
+        # Weighted combination
+        F = w_s * dS + w_m * dM + w_k * dKS + w_t * dT
+        
+        ft_values.append((ply, F))
+        
+        # Track peak
+        if F > peak_ft:
+            peak_ft = F
+            peak_ply = ply
+        
+        # Skip opening phase for streak detection
+        if ply <= cutoff_ply:
+            continue
+        
+        # Streak logic
+        if F > epsilon:
+            if streak == 0:
+                current_streak_start = ply
+            streak += 1
+            
+            if streak > max_streak:
+                max_streak = streak
+                max_streak_start = current_streak_start
+            
+            if streak >= streak_length and threshold_crossed_ply is None:
+                threshold_crossed_ply = ply
+        else:
+            streak = 0
+    
+    prediction = "WIN" if threshold_crossed_ply is not None else "DRAW"
+    
+    return PredictionResult(
+        prediction=prediction,
+        player_color=player_color.upper(),
+        player_name=player_name,
+        threshold_crossed_ply=threshold_crossed_ply,
+        max_streak=max_streak,
+        max_streak_start_ply=max_streak_start,
+        peak_ft_value=peak_ft if peak_ft != float('-inf') else 0.0,
+        peak_ft_ply=peak_ply,
+        ft_values=ft_values,
+        algorithm="per_ply",
+        parameters={
+            'cutoff_ply': cutoff_ply,
+            'streak_length': streak_length,
+            'epsilon': epsilon,
+            'weights': weights,
+        }
+    )
+
+
+def predict_outcome_windowed(
+    data: List[Dict],
+    player_color: str,
+    player_name: Optional[str] = None,
+    cutoff_ply: int = 16,
+    window_size: int = 10,
+    streak_length: int = 10,
+    epsilon: float = 0.0,
+    weights: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 0.1)
+) -> PredictionResult:
+    """
+    Predict WIN using windowed (smoothed) averaging of the Fireteam Index.
+    
+    This algorithm computes a rolling average over window_size plies, then
+    applies the same streak logic to the smoothed values. This reduces noise
+    and captures sustained positional advantage.
+    
+    Args:
+        data: List of dicts from parse_raw_positional_data()
+        player_color: "W" or "B" - which player's perspective to use
+        player_name: Optional name for display
+        cutoff_ply: Ignore plies <= this value (opening phase)
+        window_size: Number of plies to average over (default 10 = 5 full moves)
+        streak_length: Number of consecutive plies required (default 10)
+        epsilon: Margin threshold; averaged FT must be > epsilon
+        weights: Tuple (w_space, w_mobility, w_king_safety, w_threats)
+    
+    Returns:
+        PredictionResult with prediction and diagnostic info
+    """
+    from collections import deque
+    
+    w_s, w_m, w_k, w_t = weights
+    
+    # Rolling window for FT values
+    ft_window = deque()
+    ft_sum = 0.0
+    
+    streak = 0
+    max_streak = 0
+    max_streak_start = None
+    current_streak_start = None
+    
+    threshold_crossed_ply = None
+    peak_ft = float('-inf')
+    peak_ply = None
+    ft_values = []  # Store (ply, smoothed_ft) for plotting
+    
+    for row in data:
+        ply = row['ply']
+        
+        # Skip if missing data
+        if any(row[k] is None for k in ['space_w', 'space_b', 'mob_w', 'mob_b',
+                                         'ks_w', 'ks_b', 'threats_w', 'threats_b']):
+            continue
+        
+        # Compute deltas
+        dS = row['space_w'] - row['space_b']
+        dM = row['mob_w'] - row['mob_b']
+        dKS = row['ks_w'] - row['ks_b']
+        dT = row['threats_w'] - row['threats_b']
+        
+        # Flip to player's perspective if Black
+        if player_color.upper() == "B":
+            dS, dM, dKS, dT = -dS, -dM, -dKS, -dT
+        
+        # Weighted combination (per-ply value)
+        F_raw = w_s * dS + w_m * dM + w_k * dKS + w_t * dT
+        
+        # Add to rolling window
+        ft_window.append(F_raw)
+        ft_sum += F_raw
+        
+        # Remove oldest if window too large
+        if len(ft_window) > window_size:
+            ft_sum -= ft_window.popleft()
+        
+        # Don't evaluate until window is full
+        if len(ft_window) < window_size:
+            continue
+        
+        # Compute windowed average
+        F = ft_sum / window_size
+        
+        ft_values.append((ply, F))
+        
+        # Track peak
+        if F > peak_ft:
+            peak_ft = F
+            peak_ply = ply
+        
+        # Skip opening phase for streak detection
+        if ply <= cutoff_ply:
+            continue
+        
+        # Streak logic on smoothed value
+        if F > epsilon:
+            if streak == 0:
+                current_streak_start = ply
+            streak += 1
+            
+            if streak > max_streak:
+                max_streak = streak
+                max_streak_start = current_streak_start
+            
+            if streak >= streak_length and threshold_crossed_ply is None:
+                threshold_crossed_ply = ply
+        else:
+            streak = 0
+    
+    prediction = "WIN" if threshold_crossed_ply is not None else "DRAW"
+    
+    return PredictionResult(
+        prediction=prediction,
+        player_color=player_color.upper(),
+        player_name=player_name,
+        threshold_crossed_ply=threshold_crossed_ply,
+        max_streak=max_streak,
+        max_streak_start_ply=max_streak_start,
+        peak_ft_value=peak_ft if peak_ft != float('-inf') else 0.0,
+        peak_ft_ply=peak_ply,
+        ft_values=ft_values,
+        algorithm="windowed",
+        parameters={
+            'cutoff_ply': cutoff_ply,
+            'window_size': window_size,
+            'streak_length': streak_length,
+            'epsilon': epsilon,
+            'weights': weights,
+        }
+    )
+
+
+def compute_fireteam_index_for_analysis(
+    analysis: 'EnhancedGameAnalysisResult',
+    threats_divisor: float = 10.0
+) -> List[Dict]:
+    """
+    Compute Fireteam Index directly from an EnhancedGameAnalysisResult object.
+    
+    This is a convenience function that extracts positional data from the
+    analysis result without needing to write/read a .tex file.
+    
+    Args:
+        analysis: EnhancedGameAnalysisResult from the analyzer
+        threats_divisor: Divisor for threats term (default 10.0)
+    
+    Returns:
+        List of dicts suitable for predict_outcome_* functions
+    """
+    data = []
+    
+    for move in analysis.moves:
+        if move.positional_eval is None:
+            continue
+        
+        pe = move.positional_eval
+        data.append({
+            'ply': move.ply,
+            'san': move.move_san,
+            'eval_cp': int(move.eval_after) if move.eval_after else None,
+            'space_w': pe.space_white,
+            'space_b': pe.space_black,
+            'mob_w': pe.mobility_white,
+            'mob_b': pe.mobility_black,
+            'ks_w': pe.king_safety_white,
+            'ks_b': pe.king_safety_black,
+            'threats_w': pe.threats_white,
+            'threats_b': pe.threats_black,
+        })
+    
+    return data
+
+
+# =============================================================================
 # COMMAND LINE INTERFACE
 # =============================================================================
 
@@ -2988,6 +4502,18 @@ Examples:
     parser.add_argument("-q", "--quiet", action="store_true",
                        help="Suppress progress messages")
     
+    # Fireteam Index prediction options (single game mode)
+    parser.add_argument("--prediction", choices=['W', 'B'],
+                       help="(Single game) Include Fireteam Index prediction for specified player (W=White, B=Black)")
+    
+    # Fireteam Index prediction options (book mode)
+    parser.add_argument("--prediction-winner", action="store_true", default=True,
+                       help="(Book mode) Track winner in decisive games (default: True)")
+    parser.add_argument("--no-prediction", action="store_true",
+                       help="Disable Fireteam Index prediction section entirely")
+    parser.add_argument("--prediction-name", default=None,
+                       help="Track specific player by name (e.g., 'Berliner') - matches against White/Black names")
+    
     # Multi-game book options
     parser.add_argument("--book", action="store_true",
                        help="Analyze all games in PGN and generate a book (LaTeX book class)")
@@ -3026,7 +4552,11 @@ Examples:
                 include_methodology=not args.no_methodology,
                 include_plots=not args.no_plots,
                 include_ascii_plots=args.ascii_plots,
-                plot_output_dir=plot_dir
+                include_prediction=not args.no_prediction,
+                prediction_name=args.prediction_name,
+                prediction_winner=args.prediction_winner,
+                plot_output_dir=plot_dir,
+                verbose=not args.quiet
             )
             
             with open(args.output, 'w', encoding='utf-8') as f:
@@ -3083,6 +4613,9 @@ Examples:
                 include_methodology=not args.no_methodology,
                 include_plots=not args.no_plots,
                 include_ascii_plots=args.ascii_plots,
+                include_prediction=args.prediction is not None,
+                prediction_player_color=args.prediction,
+                prediction_player_name=args.prediction_name,
                 plot_output_dir=plot_dir
             )
             
