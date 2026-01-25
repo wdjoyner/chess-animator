@@ -25,7 +25,7 @@ You'll also need [Stockfish](https://stockfishchess.org/download/) installed. Th
 ### Quick Start
 
 ```python
-from chess_game_analyzer6r import analyze_game_with_positional_metrics
+from chess_game_analyzer import analyze_game_with_positional_metrics
 
 # Analyze a game and generate a LaTeX report
 result = analyze_game_with_positional_metrics(
@@ -46,26 +46,26 @@ result = analyze_game_with_positional_metrics(
 
 ```bash
 # Basic analysis with LaTeX output
-python chess_game_analyzer6r.py game.pgn -o analysis.tex
+python chess_game_analyzer.py game.pgn -o analysis.tex
 
 # With Fireteam Index prediction (tracking White)
-python chess_game_analyzer6r.py game.pgn -o analysis.tex --prediction W
+python chess_game_analyzer.py game.pgn -o analysis.tex --prediction W
 
 # Higher depth, custom Stockfish path
-python chess_game_analyzer6r.py game.pgn -o analysis.tex -d 25 -s /usr/local/bin/stockfish
+python chess_game_analyzer.py game.pgn -o analysis.tex -d 25 -s /usr/local/bin/stockfish
 ```
 
 ### Multi-Game Book
 
 ```bash
 # Generate a book from multiple games (prediction enabled by default)
-python chess_game_analyzer6r.py games.pgn --book -o book.tex --book-title "My Tournament"
+python chess_game_analyzer.py games.pgn --book -o book.tex --book-title "My Tournament"
 
 # Track a specific player across all games
-python chess_game_analyzer6r.py games.pgn --book -o book.tex --prediction-name "Carlsen"
+python chess_game_analyzer.py games.pgn --book -o book.tex --prediction-name "Carlsen"
 
 # Disable prediction section
-python chess_game_analyzer6r.py games.pgn --book -o book.tex --no-prediction
+python chess_game_analyzer.py games.pgn --book -o book.tex --no-prediction
 ```
 
 ### All Options
@@ -117,7 +117,7 @@ The dual analysis helps identify whether draws were hard-fought battles or peace
 ### Usage
 
 ```python
-from chess_game_analyzer6r import (
+from chess_game_analyzer import (
     parse_raw_positional_data,
     predict_outcome_per_ply,
     predict_outcome_windowed
@@ -164,7 +164,7 @@ Format: `ply, SAN, eval_cp, space_w, space_b, mob_w, mob_b, ks_w, ks_b, threats_
 ### Parsing Raw Data
 
 ```python
-from chess_game_analyzer6r import parse_raw_positional_data, compute_fireteam_index
+from chess_game_analyzer import parse_raw_positional_data, compute_fireteam_index
 
 # Extract data
 data = parse_raw_positional_data("analysis.tex", game_num=1)  # For multi-game books
