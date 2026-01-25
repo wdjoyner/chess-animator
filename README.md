@@ -1,4 +1,4 @@
-# Chess Game Analyzer (CGA) v6r
+# Chess Game Analyzer (CGA, version 6s)
 
 A comprehensive Python module for analyzing chess games with detailed positional metrics, generating publication-quality LaTeX reports with diagrams, and predicting game outcomes using the novel **Fireteam Index**.
 
