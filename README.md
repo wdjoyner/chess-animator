@@ -1,503 +1,269 @@
-# Chess Game Analyzer Suite
+# Chess Game Analyzer (CGA) v6r
 
-A comprehensive Python toolkit for deep analysis of chess games, generating professional LaTeX reports with positional metrics, evaluation graphs, game character classification, and animated game replays.
-
-## Modules
-
-| Module | Purpose |
-|--------|---------|
-| `chess_game_analyzer.py` | Core analysis engine — Stockfish integration, positional metrics, LaTeX reports |
-| `chess_plotting.py` | Plotting utilities — matplotlib and ASCII graphs for metrics over time |
-| `chess_animation.py` | Animation generator — GIF/MP4 replays with progressive plot reveals |
+A comprehensive Python module for analyzing chess games with detailed positional metrics, generating publication-quality LaTeX reports with diagrams, and predicting game outcomes using the novel **Fireteam Index**.
 
 ## Features
 
-- **Stockfish Integration**: Move-by-move centipawn evaluation with configurable depth
-- **Positional Metrics**: Space control, piece mobility, king safety, and threats
-- **Game Character Classification**: Automatic categorization (balanced/tense/tactical/chaotic)
-- **Multi-PV Analysis**: Suggests playable alternative moves within 50cp of best
-- **Brilliant Sacrifice Detection**: Identifies and highlights spectacular sacrifices
-- **Critical Position Identification**: Marks turning points and biggest evaluation swings
-- **LaTeX Report Generation**: Publication-ready reports with chess diagrams and plots
-- **Multi-Game Book Support**: Analyze entire PGN databases and generate book-format documents
-- **Animated Replays**: GIF/MP4 animations with progressive plot reveals
-
----
+- **Deep positional analysis** using Stockfish's classical evaluation terms (Space, Mobility, King Safety, Threats)
+- **Publication-quality LaTeX reports** with chess diagrams, annotated moves, and metric plots
+- **Multi-game book generation** with per-chapter analysis and aggregate statistics
+- **Fireteam Index prediction** — a Rithmomachia-inspired formula for predicting winners
+- **Game character classification** (balanced/tense/tactical/chaotic, one-sided/seesaw)
+- **Brilliant sacrifice detection** and critical position highlighting
+- **Raw data export** for downstream computational analysis
 
 ## Installation
 
 ### Requirements
 
-- Python 3.8+
-- Stockfish chess engine
-
-### Python Dependencies
-
 ```bash
-# Core dependencies
 pip install python-chess matplotlib
-
-# For animations
-pip install Pillow cairosvg
-
-# For MP4 output (optional)
-pip install imageio[ffmpeg]
 ```
 
-### Installing Stockfish
-
-**macOS:**
-```bash
-brew install stockfish
-# Usually installs to /usr/local/bin/stockfish or /opt/homebrew/bin/stockfish
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt install stockfish
-# Installs to /usr/games/stockfish
-```
-
-**Windows:**
-Download from [stockfishchess.org](https://stockfishchess.org/download/)
-
-### LaTeX Requirements (for PDF generation)
-
-The generated `.tex` files require these LaTeX packages:
-- `xskak` and `chessboard` — chess diagrams
-- `pgfplots` — evaluation graphs
-- `booktabs`, `longtable`, `hyperref`, `xcolor`, `graphicx`
-
----
-
-## Module 1: chess_game_analyzer.py
-
-The core analysis engine that processes PGN files and generates detailed analysis.
+You'll also need [Stockfish](https://stockfishchess.org/download/) installed. The module looks for it at `/usr/games/stockfish` by default, but you can specify a custom path.
 
 ### Quick Start
 
 ```python
-from chess_game_analyzer6h import analyze_game_with_positional_metrics
+from chess_game_analyzer6r import analyze_game_with_positional_metrics
 
-# Analyze a single game
+# Analyze a game and generate a LaTeX report
 result = analyze_game_with_positional_metrics(
-    pgn_source="game.pgn",
-    stockfish_path="/usr/local/bin/stockfish",  # Adjust for your system
+    pgn_source="my_game.pgn",
     output_path="analysis.tex",
-    include_plots=True,
-    plot_output_dir="./plots/"
-)
-
-# Access results
-print(f"White: {result.white} ({result.white_elo})")
-print(f"Black: {result.black} ({result.black_elo})")
-print(f"Result: {result.result}")
-print(f"White accuracy: {result.white_stats['accuracy']:.1f}%")
-print(f"Black accuracy: {result.black_stats['accuracy']:.1f}%")
-```
-
-### Game Character Classification
-
-```python
-# Access game character classification
-gc = result.game_character
-print(f"Game type: {gc['spread_class']} ({gc['direction_class']})")
-print(f"Evaluation range: {gc['m1']:+.2f} to {gc['m2']:+.2f}")
-print(f"Spread: {gc['spread']:.2f}")
-print(f"Description: {gc['combined_description']}")
-```
-
-Classification ranges:
-| Spread (d) | Class | Description |
-|------------|-------|-------------|
-| d < 1 | **Balanced** | Minimal advantage shifts |
-| 1 ≤ d < 3 | **Tense** | Normal competitive tension |
-| 3 ≤ d < 6 | **Tactical** | Significant swings |
-| d ≥ 6 | **Chaotic** | Wild swings, likely blunders |
-
-### Analyzing Move Quality
-
-```python
-# Iterate through moves
-for move in result.moves:
-    print(f"Move {move.ply}: {move.move_san}")
-    print(f"  Classification: {move.classification}")
-    print(f"  Eval: {move.eval_after/100:+.2f}")
-    print(f"  Best was: {move.best_move_san}")
-    
-    # Alternative moves (within 50cp of best)
-    if move.alternative_moves:
-        alts = ", ".join(san for san, _ in move.alternative_moves)
-        print(f"  Also playable: {alts}")
-    
-    # Positional metrics
-    if move.positional_eval:
-        pe = move.positional_eval
-        print(f"  Space: W={pe.space_white:.1f} B={pe.space_black:.1f}")
-        print(f"  Mobility: W={pe.mobility_white:.1f} B={pe.mobility_black:.1f}")
-```
-
-### Multi-Game Book Generation
-
-```python
-from chess_game_analyzer6h import analyze_games_to_book
-
-# Analyze all games in a PGN file and generate a book
-analyze_games_to_book(
-    pgn_source="tournament.pgn",
-    output_path="tournament_analysis.tex",
     stockfish_path="/usr/local/bin/stockfish",
-    book_title="2024 Club Championship",
-    book_author="Analysis by Stockfish 16",
-    include_plots=True,
-    plot_output_dir="./plots/"
-)
-```
-
-### Command Line Usage
-
-```bash
-# Single game analysis
-python chess_game_analyzer.py game.pgn -o analysis.tex -s /usr/local/bin/stockfish
-
-# Multi-game book
-python chess_game_analyzer.py games.pgn -o book.tex --book --book-title "My Games"
-
-# JSON output for further processing
-python chess_game_analyzer.py game.pgn --json-output analysis.json
-
-# Custom depth and time
-python chess_game_analyzer.py game.pgn -o analysis.tex -d 24 -t 2.0
-
-# Skip plots and methodology
-python chess_game_analyzer.py game.pgn -o analysis.tex --no-plots --no-methodology
-```
-
-### Command Line Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-o, --output` | Output LaTeX file | None |
-| `--json-output` | Output JSON file | None |
-| `-s, --stockfish` | Path to Stockfish | `/usr/games/stockfish` |
-| `-d, --depth` | Analysis depth | 20 |
-| `-t, --time` | Seconds per position | 1.0 |
-| `--no-diagrams` | Skip board diagrams | False |
-| `--no-methodology` | Skip methodology section | False |
-| `--no-plots` | Skip matplotlib plots | False |
-| `--ascii-plots` | Include ASCII plots | False |
-| `--book` | Generate book format | False |
-| `--book-title` | Book title | "Chess Game Collection Analysis" |
-| `--book-author` | Book author | Engine version |
-| `-q, --quiet` | Suppress progress | False |
-
----
-
-## Module 2: chess_plotting.py
-
-Generates plots of chess game metrics for LaTeX reports or standalone use.
-
-### Matplotlib Plots
-
-```python
-from chess_plotting import ChessPlotter
-
-# Generate evaluation plot
-ChessPlotter.generate_matplotlib_plot(
-    result.moves, 
-    metric='eval', 
-    output_path='plot_eval.pdf',
-    title='Position Evaluation',
-    figsize=(10, 4)
-)
-
-# Generate space control plot
-ChessPlotter.generate_matplotlib_plot(
-    result.moves,
-    metric='space',
-    output_path='plot_space.pdf'
-)
-
-# Available metrics: 'eval', 'space', 'mobility', 'king_safety', 'threats'
-```
-
-### ASCII Plots (for LaTeX verbatim)
-
-```python
-from chess_plotting import ChessPlotter
-
-# Generate ASCII art plot
-ascii_plot = ChessPlotter.generate_ascii_plot(
-    result.moves,
-    metric='eval',
-    width=70,
-    height=20
-)
-print(ascii_plot)
-```
-
-Output:
-```
-                        Position Evaluation (pawns)
-
-  2.50 |                                              W
-       |                                         W
-  1.25 |                              W      W
-       |                         W
-  0.00 |....W...W...W...W...W...............................
-       |         B   B   B   B   B
- -1.25 |                              B      B
-       |                                         B
- -2.50 |                                              B
-       +------------------------------------------------
-         1        10        20        30        40
-                          Move Number
-
-Legend: W = White   B = Black   X = overlap
-```
-
-### Check Matplotlib Availability
-
-```python
-from chess_plotting import is_matplotlib_available
-
-if is_matplotlib_available():
-    print("Matplotlib plots available")
-else:
-    print("Falling back to ASCII plots")
-```
-
----
-
-## Module 3: chess_animation.py
-
-Creates animated game replays with progressive plot reveals.
-
-### Basic Animation
-
-```python
-from chess_game_analyzer6h import analyze_game_with_positional_metrics
-from chess_animation import generate_game_animation
-
-# First analyze the game
-result = analyze_game_with_positional_metrics(
-    pgn_source="game.pgn",
-    stockfish_path="/usr/local/bin/stockfish"
-)
-
-# Generate GIF animation
-generate_game_animation(
-    result,
-    output_path="game_replay.gif",
-    frame_duration=1.0  # 1 second per move
-)
-```
-
-### Custom Configuration
-
-```python
-from chess_animation import generate_game_animation, AnimationConfig
-
-# Create custom configuration
-config = AnimationConfig(
-    board_size=500,           # Larger board
-    plot_width=400,           # Wider plots
-    plot_height=100,          # Height per plot
-    frame_duration=0.5,       # Faster playback (2 FPS)
-    mask_alpha=0.6,           # Lighter mask
-    show_move_text=True,      # Show move annotations
-    show_eval_text=True,      # Show evaluation
-    include_initial_position=True  # Start with empty board
-)
-
-generate_game_animation(result, "game_replay.gif", config)
-```
-
-### Output Formats
-
-```python
-# GIF (default, widely compatible)
-generate_game_animation(result, "replay.gif")
-
-# MP4 (smaller file size, requires imageio[ffmpeg])
-generate_game_animation(result, "replay.mp4")
-
-# PNG sequence (for custom video processing)
-generate_game_animation(result, "frames.png")
-# Creates: frames_0000.png, frames_0001.png, ...
-```
-
-### Single Frame Export
-
-```python
-from chess_animation import generate_single_frame, AnimationConfig
-
-# Export a specific position
-generate_single_frame(
-    result,
-    move_index=25,  # After move 25 (0-based)
-    output_path="position_25.png"
-)
-
-# Export initial position
-generate_single_frame(result, move_index=-1, output_path="start.png")
-```
-
-### Command Line Usage
-
-```bash
-# First generate JSON analysis
-python chess_game_analyzer.py game.pgn --json-output analysis.json -s /usr/local/bin/stockfish
-
-# Generate GIF from JSON
-python chess_animation.py analysis.json -o replay.gif
-
-# Custom options
-python chess_animation.py analysis.json -o replay.gif --fps 2 --board-size 500
-
-# Generate MP4
-python chess_animation.py analysis.json -o replay.mp4 --fps 3
-```
-
-### Animation Layout
-
-```
-+------------------+--------------------+
-|                  |  Eval plot         |
-|    Chess         |  ████████░░░░░░░░  |  <- Gray mask reveals progressively
-|    Board         +--------------------+
-|                  |  Space plot        |
-|   (current       |  ████████░░░░░░░░  |
-|    position)     +--------------------+
-|                  |  Mobility plot     |
-|    ♜ ♞ ♝ ♛ ♚     |  ████████░░░░░░░░  |
-|    ♟ ♟ ♟ ♟ ♟     +--------------------+
-|                  |  Threats plot      |
-|                  |  ████████░░░░░░░░  |
-+------------------+--------------------+
-|  Move 15: Nf3 (White)    Eval: +1.25  |
-+---------------------------------------+
-```
-
-### Dependencies Check
-
-```python
-from chess_animation import check_dependencies
-
-deps = check_dependencies()
-print(f"PIL (Pillow): {deps['PIL']}")
-print(f"matplotlib: {deps['matplotlib']}")
-print(f"cairosvg: {deps['cairosvg']}")      # Recommended for board rendering
-print(f"imageio: {deps['imageio']}")        # Required for MP4
-```
-
----
-
-## Complete Workflow Example
-
-```python
-from chess_game_analyzer6h import analyze_game_with_positional_metrics
-from chess_animation import generate_game_animation, AnimationConfig
-
-# 1. Analyze the game
-print("Analyzing game...")
-result = analyze_game_with_positional_metrics(
-    pgn_source="kasparov_deep_blue_1997_game6.pgn",
-    stockfish_path="/usr/local/bin/stockfish",
-    output_path="analysis.tex",
-    include_plots=True,
-    plot_output_dir="./plots/",
     depth=22,
-    time_limit=2.0
+    include_plots=True
 )
 
-# 2. Print summary
-print(f"\n{result.white} vs {result.black}")
-print(f"Result: {result.result}")
-print(f"Opening: {result.opening_eco} - {result.opening_name}")
-print(f"\nGame Character: {result.game_character['combined_description']}")
-print(f"White accuracy: {result.white_stats['accuracy']:.1f}%")
-print(f"Black accuracy: {result.black_stats['accuracy']:.1f}%")
-
-# 3. Find critical moments
-print("\nCritical positions:")
-for pos in result.critical_positions:
-    move_num = (pos.ply + 1) // 2
-    print(f"  Move {move_num}: {pos.move_san} - {pos.reason}")
-
-# 4. List brilliant sacrifices
-if result.brilliant_sacrifices:
-    print("\nBrilliant sacrifices:")
-    for sac in result.brilliant_sacrifices:
-        print(f"  {sac.player}: {sac.move_san} ({sac.piece_type})")
-
-# 5. Generate animation
-print("\nGenerating animation...")
-config = AnimationConfig(
-    board_size=450,
-    frame_duration=0.75
-)
-generate_game_animation(result, "game_replay.gif", config)
-
-print("\nDone! Files created:")
-print("  - analysis.tex (LaTeX report)")
-print("  - plots/*.pdf (metric plots)")
-print("  - game_replay.gif (animated replay)")
+# Compile to PDF
+# pdflatex analysis.tex
 ```
 
----
+## Command Line Usage
 
-## Data Classes Reference
+### Single Game Analysis
 
-### EnhancedGameAnalysisResult
+```bash
+# Basic analysis with LaTeX output
+python chess_game_analyzer6r.py game.pgn -o analysis.tex
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `white`, `black` | str | Player names |
-| `white_elo`, `black_elo` | int | Player ratings |
-| `result` | str | Game result ("1-0", "0-1", "1/2-1/2") |
-| `date`, `event`, `site` | str | Game metadata |
-| `opening_eco`, `opening_name` | str | Opening classification |
-| `moves` | List[EnhancedMoveAnalysis] | Move-by-move analysis |
-| `brilliant_sacrifices` | List[BrilliantSacrifice] | Detected sacrifices |
-| `critical_positions` | List[CriticalPosition] | Key moments |
-| `white_stats`, `black_stats` | Dict | Player statistics |
-| `game_character` | Dict | Game classification |
-| `positional_summary` | Dict | Aggregated metrics |
+# With Fireteam Index prediction (tracking White)
+python chess_game_analyzer6r.py game.pgn -o analysis.tex --prediction W
 
-### EnhancedMoveAnalysis
+# Higher depth, custom Stockfish path
+python chess_game_analyzer6r.py game.pgn -o analysis.tex -d 25 -s /usr/local/bin/stockfish
+```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ply` | int | Half-move number |
-| `move_san`, `move_uci` | str | Move in SAN/UCI format |
-| `is_white_move` | bool | True if White's move |
-| `eval_before`, `eval_after` | float | Centipawn evaluation |
-| `best_move_san`, `best_move_uci` | str | Engine's best move |
-| `eval_loss` | float | Centipawns lost |
-| `classification` | str | "best", "excellent", "good", "inaccuracy", "mistake", "blunder" |
-| `alternative_moves` | List[Tuple[str, float]] | Playable alternatives (SAN, eval) |
-| `positional_eval` | PositionalEvaluation | Detailed positional metrics |
+### Multi-Game Book
 
-### PositionalEvaluation
+```bash
+# Generate a book from multiple games (prediction enabled by default)
+python chess_game_analyzer6r.py games.pgn --book -o book.tex --book-title "My Tournament"
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `space_white`, `space_black` | float | Space control score |
-| `mobility_white`, `mobility_black` | float | Piece mobility score |
-| `king_safety_white`, `king_safety_black` | float | King safety score |
-| `threats_white`, `threats_black` | float | Threat score |
+# Track a specific player across all games
+python chess_game_analyzer6r.py games.pgn --book -o book.tex --prediction-name "Carlsen"
 
----
+# Disable prediction section
+python chess_game_analyzer6r.py games.pgn --book -o book.tex --no-prediction
+```
+
+### All Options
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output` | Output LaTeX file |
+| `-s, --stockfish` | Path to Stockfish executable |
+| `-d, --depth` | Analysis depth (default: 20) |
+| `-t, --time` | Time per position in seconds (default: 1.0) |
+| `--no-diagrams` | Omit chess board diagrams |
+| `--no-methodology` | Omit methodology explanation section |
+| `--no-plots` | Omit matplotlib plots |
+| `--ascii-plots` | Include ASCII plots (for environments without graphics) |
+| `--plot-dir` | Directory for plot output files |
+| `--prediction W/B` | (Single game) Track specified player for Fireteam Index |
+| `--prediction-name` | Track player by name (matches against White/Black) |
+| `--prediction-winner` | (Book mode) Track winner in decisive games (default: True) |
+| `--no-prediction` | Disable Fireteam Index prediction entirely |
+| `--book` | Generate multi-game book (LaTeX book class) |
+| `--book-title` | Title for the book |
+| `--book-author` | Author for the book |
+| `--json-output` | Export raw analysis data as JSON |
+| `-q, --quiet` | Suppress progress messages |
+
+## The Fireteam Index
+
+Inspired by Rithmomachia's "progression victory" (a well-coordinated fireteam in enemy territory), the Fireteam Index combines four positional factors:
+
+$$\text{FT} = \Delta\text{Space} + \Delta\text{Mobility} + \Delta\text{King Safety} + \frac{\Delta\text{Threats}}{10}$$
+
+Where each Δ = (Your value − Opponent's value).
+
+### Prediction Algorithms
+
+**Per-Ply Algorithm**: Looks for 10 consecutive plies (5 full moves) where the raw FT exceeds zero after the opening (ply 16).
+
+**Windowed Algorithm**: Uses a 10-ply rolling average to smooth noise before applying the same streak detection.
+
+### Handling Draws
+
+For drawn games, the Fireteam Index is analyzed from **both players' perspectives** to reveal:
+- **True draw**: Neither side achieved sustained dominance
+- **Missed win**: One side dominated but failed to convert
+- **Mutual chances**: Both sides dominated at different points
+
+The dual analysis helps identify whether draws were hard-fought battles or peaceful agreements.
+
+### Usage
+
+```python
+from chess_game_analyzer6r import (
+    parse_raw_positional_data,
+    predict_outcome_per_ply,
+    predict_outcome_windowed
+)
+
+# Parse data from a CGA-generated .tex file
+data = parse_raw_positional_data("analysis.tex")
+
+# Run predictions
+result_raw = predict_outcome_per_ply(data, player_color='W', player_name='Carlsen')
+result_smooth = predict_outcome_windowed(data, player_color='W', player_name='Carlsen')
+
+print(f"Per-ply prediction: {result_raw.prediction}")
+print(f"Windowed prediction: {result_smooth.prediction}")
+print(f"Max streak: {result_raw.max_streak} plies")
+print(f"Peak FT: {result_raw.peak_ft_value:.3f}")
+```
+
+## Positional Metrics
+
+The module extracts four key positional factors from Stockfish's classical evaluation:
+
+| Metric | Description |
+|--------|-------------|
+| **Space** | Control of central squares (files c-f, ranks 2-4/5-7) by pawns |
+| **Mobility** | Legal moves available to pieces, weighted by piece type |
+| **King Safety** | Pawn shield strength, king tropism, attack units near king |
+| **Threats** | Hanging pieces, attacks by lower-value pieces, king zone pressure |
+
+## Raw Data Format
+
+Analysis data is preserved after `\end{document}` in the LaTeX file for computational reuse:
+
+```
+% GAME_DATA_START
+% 1, e4, 35, 0.320, 0.390, 4.600, 4.150, 0.500, 0.380, 2.300, 1.900
+% 2, e5, 19, 0.340, 0.380, 4.700, 4.100, 0.500, 0.360, 2.600, 2.000
+...
+% GAME_DATA_END
+```
+
+Format: `ply, SAN, eval_cp, space_w, space_b, mob_w, mob_b, ks_w, ks_b, threats_w, threats_b`
+
+### Parsing Raw Data
+
+```python
+from chess_game_analyzer6r import parse_raw_positional_data, compute_fireteam_index
+
+# Extract data
+data = parse_raw_positional_data("analysis.tex", game_num=1)  # For multi-game books
+
+# Compute Fireteam Index
+ft_data = compute_fireteam_index(data, threats_divisor=10.0)
+
+for row in ft_data:
+    print(f"Ply {row['ply']}: FT={row['ft_white']:+.3f}")
+```
+
+## Game Character Classification
+
+Games are automatically classified based on evaluation volatility:
+
+| Classification | Spread (d) | Description |
+|----------------|------------|-------------|
+| Balanced | d < 1 | Minimal advantage shifts |
+| Tense | 1 ≤ d < 3 | Normal competitive tension |
+| Tactical | 3 ≤ d < 6 | Significant swings, complications |
+| Chaotic | d ≥ 6 | Wild swings, likely blunders |
+
+Directionality is also classified as **one-sided** (advantage never changed hands) or **seesaw** (advantage swung both ways).
+
+## Version History
+
+### v6r (Current)
+- Win prediction algorithms: `predict_outcome_per_ply()` and `predict_outcome_windowed()`
+- Fireteam Index prediction sections in LaTeX reports
+- Book mode prediction with `--prediction-name` and `--prediction-winner`
+- **Draw analysis**: Draws are now analyzed from both players' perspectives with interpretive text
+- **Methodology section**: Added comprehensive FTI explanation to Appendix
+- **Bug fix**: eval_loss now uses proper sign convention for Black moves
+- **Bug fix**: eval_loss capped at 1500cp to prevent mate score transitions from distorting accuracy statistics
+
+### v6q
+- Raw positional data preserved after `\end{document}`
+- New utility functions: `parse_raw_positional_data()`, `compute_fireteam_index()`
+
+### Earlier Versions
+- Multi-game book generation
+- Game character classification
+- Brilliant sacrifice detection
+- Multi-PV analysis with alternative move suggestions
+- Matplotlib and ASCII plot generation
+
+## Example Output
+
+The LaTeX reports include:
+
+1. **Game Information** — Event, players, date, opening
+2. **Player Statistics** — Accuracy, centipawn loss, move classifications
+3. **Positional Analysis** — Space, mobility, king safety, threats with plots
+4. **Annotated Game** — Move-by-move with error annotations
+5. **Critical Positions** — Diagrams at key moments with best continuations
+6. **Fireteam Index Prediction** — (Optional) Prediction results with FT evolution plot
+7. **Methodology** — (Optional) Explanation of how metrics are computed
+
+## API Reference
+
+### Main Functions
+
+```python
+# High-level analysis
+analyze_game_with_positional_metrics(pgn_source, output_path, ...)
+analyze_games_to_book(pgn_source, output_path, book_title, ...)
+
+# Prediction
+predict_outcome_per_ply(data, player_color, player_name, ...)
+predict_outcome_windowed(data, player_color, player_name, ...)
+
+# Data extraction
+parse_raw_positional_data(tex_filepath, game_num=None)
+compute_fireteam_index(data, threats_divisor=10.0)
+compute_fireteam_index_for_analysis(analysis, threats_divisor=10.0)
+get_game_count_in_tex(tex_filepath)
+```
+
+### Key Classes
+
+```python
+EnhancedGameAnalyzer          # Main analysis engine
+EnhancedGameAnalysisResult    # Complete analysis result
+EnhancedMoveAnalysis          # Per-move analysis data
+PositionalEvaluation          # Positional metrics breakdown
+PredictionResult              # Fireteam Index prediction result
+EnhancedLaTeXReportGenerator  # Report generation
+```
 
 ## License
 
-Modified BSD or MIT License (user's choice)
+Modified BSD or MIT license, user's choice.
 
 ## Author
 
-Generated for David Joyner's chess analysis pipeline, 2026
+Generated for David Joyner's chess analysis pipeline, January 2026.
 
-## Contributing
+## Acknowledgments
 
-Contributions welcome! Please ensure changes maintain compatibility with the LaTeX output format and include appropriate documentation.
+- [python-chess](https://python-chess.readthedocs.io/) for chess logic and PGN parsing
+- [Stockfish](https://stockfishchess.org/) for position evaluation
+- The Fireteam Index concept is inspired by [Rithmomachia](https://en.wikipedia.org/wiki/Rithmomachia), the medieval "Philosophers' Game"
