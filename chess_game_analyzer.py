@@ -106,12 +106,13 @@ Usage:
     >>> report_output = "../wdj-games/Joyner-vs-Goodson_2023-05-16-analysis.tex"
     >>> result = analyze_game_with_positional_metrics(pgn_source=game_pgn,output_path=report_output,include_plots=True,include_ascii_plots=False, plot_output_dir = "../wdj-games/plots/")
 
-
-NEW IN VERSION 6r, 6s:
+NEW IN VERSION 6q:
 - Raw positional data preserved after \\end{document} in machine-readable format
 - Data includes: ply, SAN, eval_cp, space_w/b, mobility_w/b, king_safety_w/b, threats_w/b
 - New utility functions: parse_raw_positional_data(), compute_fireteam_index()
 - Enables downstream analysis like the "Fireteam Index" for win prediction
+
+NEW IN VERSION 6r:
 - Win prediction algorithms: predict_outcome_per_ply() and predict_outcome_windowed()
 - Optional Fireteam Index prediction section in LaTeX reports (include_prediction=True)
 - Fireteam Index plots (per-ply and smoothed versions) in reports
@@ -123,7 +124,33 @@ NEW IN VERSION 6r, 6s:
   accuracy statistics. Previously, games with missed mates could show <20% accuracy
   even for strong play, because a single "lose mate" move counted as 9000+ cp loss.
 
-Author: Generated for David Joyner's chess analysis pipeline, 2026-01-25
+NEW IN VERSION 6v:
+- BUG FIX: Added \\usepackage{amsmath} to LaTeX preamble (required for \\text{})
+- NEW: Three FTI variants with different weight "signatures":
+  - FTI1: Harmonious (0.25, 0.25, 0.25, 0.25) - equal weights (with T pre-scaled)
+  - FTI2: Tactical (0.6, 0.1, 0.0, 0.3) - Space + Threats + some Mobility
+  - FTI3: Strategic (0.7, 0.1, 0.1, 0.1) - Space + Mobility + some K/T
+- FTI weights can be thought of as "signatures" capturing different playing styles
+- All three FTI variants tracked in book prediction summaries
+- Updated methodology section (A.7) with all three formulas and footnotes
+- New constants: FTI1_WEIGHTS, FTI2_WEIGHTS, FTI3_WEIGHTS
+
+NEW IN VERSION 6v:
+- RENAMED: FTI1 from "Balanced" to "Harmonious" (less confusing with Balance algorithm)
+- RESCALED: Threats (T) is now normalized by dividing raw value by THREATS_SCALE_FACTOR (20)
+  This allows FTI1 to use true equal weights (1/4, 1/4, 1/4, 1/4) on comparable metrics
+- UPDATED FTI WEIGHTS:
+  - FTI1 (Harmonious): (0.25, 0.25, 0.25, 0.25) - equal weights with T pre-scaled
+  - FTI2 (Tactical): (0.6, 0.1, 0.0, 0.3) - adds some Mobility to Space+Threats
+  - FTI3 (Strategic): (0.7, 0.1, 0.1, 0.1) - adds KingSafety+Threats to Space+Mobility
+- IMPROVED Balance algorithm:
+  - Volatility threshold now scales with game length: V_threshold = V_RATIO * total_plies
+  - Default V_RATIO = 0.20 (20% of game length)
+  - New confidence-based prediction using: confidence = |B_n| * (1 - V/max_V)
+  - Predicts WIN/LOSS if confidence > CONFIDENCE_THRESHOLD (default 0.15)
+- New constants: THREATS_SCALE_FACTOR, V_RATIO, CONFIDENCE_THRESHOLD
+
+Author: Generated for David Joyner's chess analysis pipeline, 2026-01-27
 distribution license: either modified BSD or MIT license, user's choice.
 """
 
@@ -171,6 +198,49 @@ PLAYABLE_THRESHOLD = 50
 # that would completely distort accuracy statistics. A cap of 1500cp (15 pawns)
 # still represents a catastrophic blunder but won't ruin the entire game's stats.
 MAX_EVAL_LOSS_FOR_ACCURACY = 1500
+
+# Fireteam Index weight configurations: (Space, Mobility, KingSafety, Threats)
+# These can be thought of as "signatures" capturing different playing styles.
+# Note: Threats values are scaled by THREATS_SCALE_FACTOR before weighting.
+
+# Scaling factor for Threats metric to bring it into comparable range with other metrics
+# Raw Threats values are typically 5-20, while Space/Mobility/KingSafety are 0.1-0.5
+# Dividing by 20 normalizes Threats to a similar scale
+THREATS_SCALE_FACTOR = 20.0
+
+# FTI1: Harmonious - equal weights across all four factors
+# Baseline signature with all positional factors contributing equally
+FTI1_WEIGHTS = (0.25, 0.25, 0.25, 0.25)
+
+# FTI2: Tactical - Space and Threats emphasis for active pressure
+# Captures a style that creates pressure through territory and concrete threats
+FTI2_WEIGHTS = (0.6, 0.1, 0.0, 0.3)
+
+# FTI3: Strategic - Space-dominant for long-term positional control
+# Captures a style focused on territorial domination
+FTI3_WEIGHTS = (0.7, 0.1, 0.1, 0.1)
+
+# FTI4: Dynamic - Mobility-dominant for piece activity and maneuvering
+# Captures a fluid style emphasizing piece play over static advantages
+FTI4_WEIGHTS = (0.2, 0.6, 0.0, 0.2)
+
+# FTI5: Solid - King Safety emphasis for defensive, prophylactic play
+# Captures a style focused on security and preventing opponent's play
+FTI5_WEIGHTS = (0.3, 0.2, 0.5, 0.0)
+
+# Balance algorithm parameters
+# Volatility ratio: V_threshold = V_RATIO * total_plies
+# A 100-ply game with V_RATIO=0.20 has V_threshold=20
+V_RATIO = 0.20
+
+# Confidence threshold for predicting WIN/LOSS
+# confidence = |B_n| * (1 - V/V_threshold)
+# If confidence > CONFIDENCE_THRESHOLD, predict WIN/LOSS; else DRAW
+CONFIDENCE_THRESHOLD = 0.15
+
+# Epsilon threshold for FTI: the minimum FTI value to count as "meaningful advantage"
+# Used in streak detection and balance calculations
+FTI_EPSILON = 0.2
 
 
 def parse_elo(elo_str: str) -> Optional[int]:
@@ -1597,6 +1667,7 @@ class EnhancedLaTeXReportGenerator:
             r"\documentclass[11pt]{article}",
             r"\usepackage[utf8]{inputenc}",
             r"\usepackage{xskak}",
+            r"\usepackage{amsmath}",
             r"\usepackage{amssymb}",
             r"\usepackage{chessboard}",
             r"\usepackage[margin=1in]{geometry}",
@@ -1851,7 +1922,7 @@ class EnhancedLaTeXReportGenerator:
                         r"Metric & White & Black \\",
                         r"\midrule",
                         rf"Space & {pe.space_white:.2f} & {pe.space_black:.2f} \\",
-                        rf"Mobility (MG) & {pe.mobility_white_mg:.2f} & {pe.mobility_black_mg:.2f} \\",
+                        rf"Mobility & {pe.mobility_white:.2f} & {pe.mobility_black:.2f} \\",
                         rf"King Safety & {pe.king_safety_white:.2f} & {pe.king_safety_black:.2f} \\",
                         rf"Threats & {pe.threats_white:.2f} & {pe.threats_black:.2f} \\",
                         r"\bottomrule",
@@ -2204,7 +2275,7 @@ class EnhancedLaTeXReportGenerator:
             r"\begin{itemize}",
             r"\item Opening cutoff: ply 16 (first 8 moves ignored)",
             r"\item Streak length: 10 plies (5 full moves required)",
-            r"\item Margin ($\epsilon$): 0.0 (any positive advantage counts)",
+            r"\item Margin ($\epsilon$): 0.25 (any positive advantage counts)",
             r"\item Weights: Space=1.0, Mobility=1.0, King Safety=1.0, Threats=0.1",
             r"\end{itemize}",
             r"",
@@ -2509,35 +2580,79 @@ class EnhancedLaTeXReportGenerator:
             r"of pieces (a ``fireteam'') establishes control deep in enemy territory. Similarly, in chess, "
             r"sustained positional dominance across multiple factors often precedes victory.",
             r"",
-            r"\paragraph{Formula.} The Fireteam Index combines the four positional metrics into a single value "
-            r"measuring overall positional advantage from a given player's perspective:",
+            r"The FTI weights can be thought of as \emph{signatures} that capture different playing styles. "
+            r"By adjusting which positional factors receive emphasis, the FTI can be tuned to better predict "
+            r"outcomes for players with different strategic preferences.",
+            r"",
+            r"\paragraph{Threats Scaling.} The raw Threats metric ($T$) produces values typically ranging from "
+            r"5--20, while Space, Mobility, and King Safety range from approximately 0.1--0.5. To make these "
+            r"comparable, Threats is divided by a scaling factor of 20 before weighting. The scaled value "
+            r"$T' = T/20$ brings Threats into a similar range as the other metrics.",
+            r"",
+            r"\paragraph{FTI1: Harmonious Formula.} The harmonious Fireteam Index weights all four positional metrics equally "
+            r"(with Threats pre-scaled):",
             r"",
             r"\begin{equation}",
-            r"\text{FT} = \Delta\text{Space} + \Delta\text{Mobility} + \Delta\text{King Safety} + \frac{\Delta\text{Threats}}{10}",
+            r"\text{FTI}_1 = \frac{1}{4} \Delta S + \frac{1}{4} \Delta M + \frac{1}{4} \Delta K + \frac{1}{4} \Delta T'",
             r"\end{equation}",
             r"",
-            r"where each $\Delta$ represents (Player's value $-$ Opponent's value). Positive FT indicates "
+            r"where $\Delta S$ = Space, $\Delta M$ = Mobility, $\Delta K$ = King Safety, and $\Delta T' = T/20$ = scaled Threats, "
+            r"each computed as (Player's value $-$ Opponent's value). Positive FTI indicates "
             r"the player has overall positional superiority; negative indicates the opponent is better.",
             r"",
-            r"The Threats component is divided by 10 because its raw values are typically an order of magnitude "
-            r"larger than the other metrics, and empirical testing showed this weighting provides better "
-            r"predictive accuracy.",
+            r"\paragraph{FTI2: Tactical.} This variant emphasizes territorial control and tactical "
+            r"pressure through Space and Threats:",
             r"",
-            r"\paragraph{Prediction Algorithms.} Two algorithms are used to predict game outcomes based on FT:",
+            r"\begin{equation}",
+            r"\text{FTI}_2 = 0.6 \Delta S + 0.1 \Delta M + 0.3 \Delta T'",
+            r"\end{equation}",
+            r"",
+            r"\paragraph{FTI3: Strategic.} This variant emphasizes long-term spatial dominance:",
+            r"",
+            r"\begin{equation}",
+            r"\text{FTI}_3 = 0.7 \Delta S + 0.1 \Delta M + 0.1 \Delta K + 0.1 \Delta T'",
+            r"\end{equation}",
+            r"",
+            r"\paragraph{FTI4: Dynamic.} This variant emphasizes piece activity and maneuvering:",
+            r"",
+            r"\begin{equation}",
+            r"\text{FTI}_4 = 0.2 \Delta S + 0.6 \Delta M + 0.2 \Delta T'",
+            r"\end{equation}",
+            r"",
+            r"\paragraph{FTI5: Solid.} This variant emphasizes king safety and defensive play:",
+            r"",
+            r"\begin{equation}",
+            r"\text{FTI}_5 = 0.3 \Delta S + 0.2 \Delta M + 0.5 \Delta K",
+            r"\end{equation}",
+            r"",
+            r"\paragraph{Prediction Algorithms.} Three algorithms are used to predict game outcomes based on FTI "
+            r"(applied independently to each of the five variants):",
             r"",
             r"\begin{enumerate}",
-            r"\item \textbf{Per-Ply (Raw)}: Examines the raw FT value at each ply after the opening phase "
-            r"(ply 16, approximately 8 moves). If FT exceeds zero for 10 consecutive plies (5 full moves), "
-            r"a WIN is predicted for that player.",
+            r"\item \textbf{Per-Ply (Raw)}: Examines the raw FTI value at each ply after the opening phase "
+            r"(ply 16, approximately 8 moves). If FTI $> \epsilon$ (default $\epsilon = 0.25$) for 10 consecutive "
+            r"plies (5 full moves), a WIN is predicted for that player.",
             r"",
-            r"\item \textbf{Windowed (Smoothed)}: Computes a 10-ply rolling average of FT before applying "
+            r"\item \textbf{Windowed (Smoothed)}: Computes a 10-ply rolling average of FTI before applying "
             r"the same streak detection. This smooths out tactical noise and captures sustained trends "
             r"rather than momentary fluctuations.",
+            r"",
+            r"\item \textbf{Balance (Confidence-based)}: Predicts outcomes using a confidence score that combines "
+            r"balance and volatility:",
+            r"\begin{itemize}",
+            r"\item \emph{Normalized Balance} $B_n = \frac{(\text{plies with FTI} > \epsilon) - (\text{plies with FTI} < -\epsilon)}{\text{total plies}}$",
+            r"\item \emph{Volatility} $V$ = number of times FTI crosses zero (sign changes)",
+            r"\item \emph{Volatility threshold} $V_{\max} = 0.2 \times \text{total plies}$ (scales with game length)",
+            r"\item \emph{Confidence} $C = |B_n| \times \max(0, 1 - V/V_{\max})$",
+            r"\end{itemize}",
+            r"The prediction is: WIN if $C > 0.15$ and $B_n > 0$; LOSS if $C > 0.15$ and $B_n < 0$; "
+            r"DRAW otherwise. Low confidence (due to balanced play or high volatility) predicts a draw.",
             r"\end{enumerate}",
             r"",
-            r"Both algorithms predict DRAW if no player achieves the required streak of positional dominance.",
+            r"The Per-Ply and Windowed algorithms predict DRAW only when no streak is achieved, whereas the "
+            r"Balance algorithm explicitly detects drawish characteristics (balanced plies, back-and-forth play).",
             r"",
-            r"\paragraph{Interpretation.} The FT prediction measures \emph{positional} dominance, which is a "
+            r"\paragraph{Interpretation.} The FTI prediction measures \emph{positional} dominance, which is a "
             r"necessary but not sufficient condition for winning. A player may dominate positionally yet fail "
             r"to convert due to:",
             r"\begin{itemize}",
@@ -2547,11 +2662,18 @@ class EnhancedLaTeXReportGenerator:
             r"\item Drawing tendencies in certain structures (opposite-colored bishops, fortresses)",
             r"\end{itemize}",
             r"",
-            r"Conversely, a player may win without ever achieving sustained FT dominance through a single "
-            r"tactical strike or opponent error. The FT metric is most predictive in games where positional "
+            r"Conversely, a player may win without ever achieving sustained FTI dominance through a single "
+            r"tactical strike or opponent error. The FTI metric is most predictive in games where positional "
             r"understanding---rather than pure calculation---determines the outcome.",
             r"",
-            r"\paragraph{For Draws.} When analyzing drawn games, the FT is computed from both players' "
+            r"\paragraph{Choosing a Signature.} Different FTI signatures may perform better for different players "
+            r"or playing styles. FTI2 (Tactical) tends to predict well for players who build up "
+            r"territorial control and convert through direct threats. FTI3 (Strategic) may better "
+            r"capture the style of players who emphasize piece activity and spatial domination. Comparing "
+            r"prediction accuracy across signatures can reveal which positional factors most strongly correlate "
+            r"with a player's wins.",
+            r"",
+            r"\paragraph{For Draws.} When analyzing drawn games, the FTI is computed from both players' "
             r"perspectives. This reveals whether:",
             r"\begin{itemize}",
             r"\item Neither side achieved dominance (a ``true draw'' with balanced play)",
@@ -2628,6 +2750,7 @@ class EnhancedLaTeXReportGenerator:
             r"\documentclass[11pt]{book}",
             r"\usepackage[utf8]{inputenc}",
             r"\usepackage{xskak}",
+            r"\usepackage{amsmath}",
             r"\usepackage{amssymb}",
             r"\usepackage{chessboard}",
             r"\usepackage[margin=1in]{geometry}",
@@ -2664,9 +2787,29 @@ class EnhancedLaTeXReportGenerator:
             'total_games': len(analyses),
             'decisive_games': 0,
             'draws': 0,
-            'per_ply_correct': 0,
-            'windowed_correct': 0,
+            # FTI1: Harmonious (0.25, 0.25, 0.25, 0.25)
+            'fti1_per_ply_correct': 0,
+            'fti1_windowed_correct': 0,
+            'fti1_balance_correct': 0,
+            # FTI2: Tactical (0.6, 0.1, 0.0, 0.3)
+            'fti2_per_ply_correct': 0,
+            'fti2_windowed_correct': 0,
+            'fti2_balance_correct': 0,
+            # FTI3: Strategic (0.7, 0.1, 0.1, 0.1)
+            'fti3_per_ply_correct': 0,
+            'fti3_windowed_correct': 0,
+            'fti3_balance_correct': 0,
+            # FTI4: Dynamic (0.2, 0.6, 0.0, 0.2)
+            'fti4_per_ply_correct': 0,
+            'fti4_windowed_correct': 0,
+            'fti4_balance_correct': 0,
+            # FTI5: Solid (0.3, 0.2, 0.5, 0.0)
+            'fti5_per_ply_correct': 0,
+            'fti5_windowed_correct': 0,
+            'fti5_balance_correct': 0,
             'games_with_prediction': 0,
+            # Data for linear regression to find optimal weights
+            'regression_data': [],
         }
         
         # Generate each game as a chapter
@@ -2735,20 +2878,192 @@ class EnhancedLaTeXReportGenerator:
                 rf"Decisive games & {prediction_stats['decisive_games']} \\",
                 rf"Draws (both sides analyzed) & {prediction_stats['draws']} \\",
                 rf"Games with prediction & {prediction_stats['games_with_prediction']} \\",
-                r"\midrule",
+                r"\bottomrule",
+                r"\end{tabular}",
+                r"",
             ])
             
             if prediction_stats['games_with_prediction'] > 0:
-                pp_acc = 100 * prediction_stats['per_ply_correct'] / prediction_stats['games_with_prediction']
-                w_acc = 100 * prediction_stats['windowed_correct'] / prediction_stats['games_with_prediction']
+                n_games = prediction_stats['games_with_prediction']
+                fti1_pp_acc = 100 * prediction_stats['fti1_per_ply_correct'] / n_games
+                fti1_w_acc = 100 * prediction_stats['fti1_windowed_correct'] / n_games
+                fti1_bal_acc = 100 * prediction_stats['fti1_balance_correct'] / n_games
+                fti2_pp_acc = 100 * prediction_stats['fti2_per_ply_correct'] / n_games
+                fti2_w_acc = 100 * prediction_stats['fti2_windowed_correct'] / n_games
+                fti2_bal_acc = 100 * prediction_stats['fti2_balance_correct'] / n_games
+                fti3_pp_acc = 100 * prediction_stats['fti3_per_ply_correct'] / n_games
+                fti3_w_acc = 100 * prediction_stats['fti3_windowed_correct'] / n_games
+                fti3_bal_acc = 100 * prediction_stats['fti3_balance_correct'] / n_games
+                fti4_pp_acc = 100 * prediction_stats['fti4_per_ply_correct'] / n_games
+                fti4_w_acc = 100 * prediction_stats['fti4_windowed_correct'] / n_games
+                fti4_bal_acc = 100 * prediction_stats['fti4_balance_correct'] / n_games
+                fti5_pp_acc = 100 * prediction_stats['fti5_per_ply_correct'] / n_games
+                fti5_w_acc = 100 * prediction_stats['fti5_windowed_correct'] / n_games
+                fti5_bal_acc = 100 * prediction_stats['fti5_balance_correct'] / n_games
+                
                 lines.extend([
-                    rf"Per-ply correct & {prediction_stats['per_ply_correct']}/{prediction_stats['games_with_prediction']} ({pp_acc:.1f}\%) \\",
-                    rf"Windowed correct & {prediction_stats['windowed_correct']}/{prediction_stats['games_with_prediction']} ({w_acc:.1f}\%) \\",
+                    r"\subsection{FTI1: Harmonious ($\frac{1}{4}, \frac{1}{4}, \frac{1}{4}, \frac{1}{4}$)}",
+                    r"",
+                    r"\begin{tabular}{lcc}",
+                    r"\toprule",
+                    r"\textbf{Algorithm} & \textbf{Correct} & \textbf{Accuracy} \\",
+                    r"\midrule",
+                    rf"Per-ply (raw) & {prediction_stats['fti1_per_ply_correct']}/{n_games} & {fti1_pp_acc:.1f}\% \\",
+                    rf"Windowed (smoothed) & {prediction_stats['fti1_windowed_correct']}/{n_games} & {fti1_w_acc:.1f}\% \\",
+                    rf"Balance & {prediction_stats['fti1_balance_correct']}/{n_games} & {fti1_bal_acc:.1f}\% \\",
+                    r"\bottomrule",
+                    r"\end{tabular}",
+                    r"",
+                    r"\subsection{FTI2: Tactical ($0.6, 0.1, 0, 0.3$)}",
+                    r"",
+                    r"\begin{tabular}{lcc}",
+                    r"\toprule",
+                    r"\textbf{Algorithm} & \textbf{Correct} & \textbf{Accuracy} \\",
+                    r"\midrule",
+                    rf"Per-ply (raw) & {prediction_stats['fti2_per_ply_correct']}/{n_games} & {fti2_pp_acc:.1f}\% \\",
+                    rf"Windowed (smoothed) & {prediction_stats['fti2_windowed_correct']}/{n_games} & {fti2_w_acc:.1f}\% \\",
+                    rf"Balance & {prediction_stats['fti2_balance_correct']}/{n_games} & {fti2_bal_acc:.1f}\% \\",
+                    r"\bottomrule",
+                    r"\end{tabular}",
+                    r"",
+                    r"\subsection{FTI3: Strategic ($0.7, 0.1, 0.1, 0.1$)}",
+                    r"",
+                    r"\begin{tabular}{lcc}",
+                    r"\toprule",
+                    r"\textbf{Algorithm} & \textbf{Correct} & \textbf{Accuracy} \\",
+                    r"\midrule",
+                    rf"Per-ply (raw) & {prediction_stats['fti3_per_ply_correct']}/{n_games} & {fti3_pp_acc:.1f}\% \\",
+                    rf"Windowed (smoothed) & {prediction_stats['fti3_windowed_correct']}/{n_games} & {fti3_w_acc:.1f}\% \\",
+                    rf"Balance & {prediction_stats['fti3_balance_correct']}/{n_games} & {fti3_bal_acc:.1f}\% \\",
+                    r"\bottomrule",
+                    r"\end{tabular}",
+                    r"",
+                    r"\subsection{FTI4: Dynamic ($0.2, 0.6, 0, 0.2$)}",
+                    r"",
+                    r"\begin{tabular}{lcc}",
+                    r"\toprule",
+                    r"\textbf{Algorithm} & \textbf{Correct} & \textbf{Accuracy} \\",
+                    r"\midrule",
+                    rf"Per-ply (raw) & {prediction_stats['fti4_per_ply_correct']}/{n_games} & {fti4_pp_acc:.1f}\% \\",
+                    rf"Windowed (smoothed) & {prediction_stats['fti4_windowed_correct']}/{n_games} & {fti4_w_acc:.1f}\% \\",
+                    rf"Balance & {prediction_stats['fti4_balance_correct']}/{n_games} & {fti4_bal_acc:.1f}\% \\",
+                    r"\bottomrule",
+                    r"\end{tabular}",
+                    r"",
+                    r"\subsection{FTI5: Solid ($0.3, 0.2, 0.5, 0$)}",
+                    r"",
+                    r"\begin{tabular}{lcc}",
+                    r"\toprule",
+                    r"\textbf{Algorithm} & \textbf{Correct} & \textbf{Accuracy} \\",
+                    r"\midrule",
+                    rf"Per-ply (raw) & {prediction_stats['fti5_per_ply_correct']}/{n_games} & {fti5_pp_acc:.1f}\% \\",
+                    rf"Windowed (smoothed) & {prediction_stats['fti5_windowed_correct']}/{n_games} & {fti5_w_acc:.1f}\% \\",
+                    rf"Balance & {prediction_stats['fti5_balance_correct']}/{n_games} & {fti5_bal_acc:.1f}\% \\",
+                    r"\bottomrule",
+                    r"\end{tabular}",
+                    r"",
+                    r"\subsection{Comparison}",
+                    r"",
                 ])
+                
+                # Determine which is best (considering all algorithms)
+                fti1_best = max(fti1_pp_acc, fti1_w_acc, fti1_bal_acc)
+                fti2_best = max(fti2_pp_acc, fti2_w_acc, fti2_bal_acc)
+                fti3_best = max(fti3_pp_acc, fti3_w_acc, fti3_bal_acc)
+                fti4_best = max(fti4_pp_acc, fti4_w_acc, fti4_bal_acc)
+                fti5_best = max(fti5_pp_acc, fti5_w_acc, fti5_bal_acc)
+                
+                best_acc = max(fti1_best, fti2_best, fti3_best, fti4_best, fti5_best)
+                winners = []
+                if fti1_best >= best_acc - 2:
+                    winners.append(("FTI1 (Harmonious)", fti1_best))
+                if fti2_best >= best_acc - 2:
+                    winners.append(("FTI2 (Tactical)", fti2_best))
+                if fti3_best >= best_acc - 2:
+                    winners.append(("FTI3 (Strategic)", fti3_best))
+                if fti4_best >= best_acc - 2:
+                    winners.append(("FTI4 (Dynamic)", fti4_best))
+                if fti5_best >= best_acc - 2:
+                    winners.append(("FTI5 (Solid)", fti5_best))
+                
+                if len(winners) == 1:
+                    lines.append(
+                        rf"\textbf{{{winners[0][0]}}} shows the best predictive accuracy at {winners[0][1]:.1f}\%."
+                    )
+                elif len(winners) == 2:
+                    lines.append(
+                        rf"\textbf{{{winners[0][0]}}} ({winners[0][1]:.1f}\%) and \textbf{{{winners[1][0]}}} ({winners[1][1]:.1f}\%) "
+                        r"show similar predictive accuracy (within 2\%)."
+                    )
+                else:
+                    lines.append(
+                        rf"Multiple FTI variants show similar predictive accuracy (within 2\% of best): "
+                    )
+                    acc_strs = [f"{name}={acc:.1f}\\%" for name, acc in winners]
+                    lines.append(", ".join(acc_strs) + ".")
+                
+                lines.append(r"")
+                
+                # Compute optimal weights via linear regression
+                if 'regression_data' in prediction_stats and len(prediction_stats['regression_data']) >= 3:
+                    optimal_result = compute_optimal_fti_weights(prediction_stats['regression_data'])
+                    if optimal_result is not None:
+                        opt_weights, r_squared = optimal_result
+                        lines.extend([
+                            r"\subsection{Empirically Optimal Weights}",
+                            r"",
+                            r"Using linear regression on the per-ply positional data from all games, "
+                            r"the following weights best predict game outcomes (win=1, draw=0.5, loss=0):",
+                            r"",
+                            r"\begin{equation}",
+                            rf"\text{{FTI}}_{{opt}} = {opt_weights[0]:.2f} \Delta S + {opt_weights[1]:.2f} \Delta M + {opt_weights[2]:.2f} \Delta K + {opt_weights[3]:.2f} \Delta T'",
+                            r"\end{equation}",
+                            r"",
+                            rf"Weights: $w_S = {opt_weights[0]:.3f}$, $w_M = {opt_weights[1]:.3f}$, "
+                            rf"$w_K = {opt_weights[2]:.3f}$, $w_T = {opt_weights[3]:.3f}$ "
+                            rf"($R^2 = {r_squared:.3f}$)",
+                            r"",
+                        ])
+                        
+                        # Evaluate accuracy with optimal weights
+                        opt_accuracy = evaluate_optimal_weights_accuracy(
+                            prediction_stats['regression_data'],
+                            opt_weights
+                        )
+                        
+                        if opt_accuracy['total'] > 0:
+                            n_opt = opt_accuracy['total']
+                            opt_pp_acc = 100 * opt_accuracy['per_ply_correct'] / n_opt
+                            opt_w_acc = 100 * opt_accuracy['windowed_correct'] / n_opt
+                            opt_bal_acc = 100 * opt_accuracy['balance_correct'] / n_opt
+                            
+                            lines.extend([
+                                r"\paragraph{Prediction Accuracy with Optimal Weights}\ \\",
+                                r"",
+                                r"\begin{tabular}{lrr}",
+                                r"\toprule",
+                                r"\textbf{Algorithm} & \textbf{Correct} & \textbf{Accuracy} \\",
+                                r"\midrule",
+                                rf"Per-ply & {opt_accuracy['per_ply_correct']}/{n_opt} & {opt_pp_acc:.1f}\% \\",
+                                rf"Windowed & {opt_accuracy['windowed_correct']}/{n_opt} & {opt_w_acc:.1f}\% \\",
+                                rf"Balance & {opt_accuracy['balance_correct']}/{n_opt} & {opt_bal_acc:.1f}\% \\",
+                                r"\bottomrule",
+                                r"\end{tabular}",
+                                r"",
+                            ])
+                        
+                        # Compare with predefined signatures
+                        lines.append(r"For comparison, the predefined signatures are:")
+                        lines.append(r"\begin{itemize}")
+                        lines.append(rf"\item FTI1 (Harmonious): $(0.25, 0.25, 0.25, 0.25)$")
+                        lines.append(rf"\item FTI2 (Tactical): $(0.60, 0.10, 0.00, 0.30)$")
+                        lines.append(rf"\item FTI3 (Strategic): $(0.70, 0.10, 0.10, 0.10)$")
+                        lines.append(rf"\item FTI4 (Dynamic): $(0.20, 0.60, 0.00, 0.20)$")
+                        lines.append(rf"\item FTI5 (Solid): $(0.30, 0.20, 0.50, 0.00)$")
+                        lines.append(r"\end{itemize}")
+                        lines.append(r"")
             
             lines.extend([
-                r"\bottomrule",
-                r"\end{tabular}",
                 r"",
             ])
             
@@ -2769,11 +3084,21 @@ class EnhancedLaTeXReportGenerator:
                     )
                 
                 lines.extend([
-                    r"A ``WIN'' prediction means the Fireteam Index exceeded the threshold for the required "
-                    r"number of consecutive plies, indicating sustained positional dominance.",
+                    r"Three prediction algorithms are compared:",
+                    r"\begin{itemize}",
+                    r"\item \textbf{Per-ply}: Predicts WIN if FTI $> \epsilon$ for 10 consecutive plies (raw values)",
+                    r"\item \textbf{Windowed}: Same logic but applied to a 10-ply rolling average",
+                    r"\item \textbf{Balance}: Uses normalized balance $B_n$ (plies ahead $-$ plies behind) "
+                    r"and volatility $V$ (sign changes). Predicts DRAW if $|B_n| < 0.2$ or $V \ge 10$",
+                    r"\end{itemize}",
                     r"",
-                    r"The per-ply algorithm uses raw positional deltas, while the windowed algorithm "
-                    r"smooths values over a 10-ply (5 full move) rolling average to reduce noise.",
+                    r"The Balance algorithm explicitly models draws by detecting games where neither side "
+                    r"maintains a consistent advantage, or where the advantage changes hands frequently.",
+                    r"",
+                    r"The different FTI signatures may perform better or worse depending on the playing style "
+                    r"of the players being analyzed. FTI2 (Tactical) tends to predict well for players "
+                    r"who emphasize territorial control and tactical threats, while FTI3 (Strategic) "
+                    r"may better capture the style of players who prioritize space and piece activity.",
                     r"",
                 ])
         
@@ -3038,7 +3363,7 @@ class EnhancedLaTeXReportGenerator:
                         r"Metric & White & Black \\",
                         r"\midrule",
                         rf"Space & {pe.space_white:.2f} & {pe.space_black:.2f} \\",
-                        rf"Mobility (MG) & {pe.mobility_white_mg:.2f} & {pe.mobility_black_mg:.2f} \\",
+                        rf"Mobility  & {pe.mobility_white:.2f} & {pe.mobility_black:.2f} \\",
                         rf"King Safety & {pe.king_safety_white:.2f} & {pe.king_safety_black:.2f} \\",
                         rf"Threats & {pe.threats_white:.2f} & {pe.threats_black:.2f} \\",
                         r"\bottomrule",
@@ -3287,6 +3612,20 @@ class EnhancedLaTeXReportGenerator:
         was_draw = analysis.result in ("1/2-1/2", "1/2")
         
         if is_draw_dual:
+            if prediction_stats is not None and 'regression_data' in prediction_stats:
+                # Use White's perspective for the regression data in a draw
+                deltas = []
+                for row in data:
+                    dS = row['space_w'] - row['space_b']
+                    dM = row['mob_w'] - row['mob_b']
+                    dK = row['ks_w'] - row['ks_b']
+                    dT = (row['threats_w'] - row['threats_b']) / THREATS_SCALE_FACTOR
+                    deltas.append((row['ply'], dS, dM, dK, dT))
+    
+                prediction_stats['regression_data'].append({
+                    'outcome': 0.5, # The draw value
+                    'deltas': deltas
+                })
             # Analyze from both perspectives for draws
             lines.extend([
                 r"\section{Fireteam Index Prediction}",
@@ -3297,152 +3636,390 @@ class EnhancedLaTeXReportGenerator:
                 r"",
             ])
             
-            # Run predictions for both sides
-            result_white_pp = predict_outcome_per_ply(data, player_color='W')
-            result_white_w = predict_outcome_windowed(data, player_color='W')
-            result_black_pp = predict_outcome_per_ply(data, player_color='B')
-            result_black_w = predict_outcome_windowed(data, player_color='B')
+            # Run predictions for both sides - FTI1
+            result_white_fti1_pp = predict_outcome_per_ply(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI1_WEIGHTS)
+            result_white_fti1_w = predict_outcome_windowed(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI1_WEIGHTS)
+            result_black_fti1_pp = predict_outcome_per_ply(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI1_WEIGHTS)
+            result_black_fti1_w = predict_outcome_windowed(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI1_WEIGHTS)
+            
+            # Run predictions for both sides - FTI2
+            result_white_fti2_pp = predict_outcome_per_ply(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI2_WEIGHTS)
+            result_white_fti2_w = predict_outcome_windowed(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI2_WEIGHTS)
+            result_black_fti2_pp = predict_outcome_per_ply(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI2_WEIGHTS)
+            result_black_fti2_w = predict_outcome_windowed(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI2_WEIGHTS)
+            
+            # Run predictions for both sides - FTI3
+            result_white_fti3_pp = predict_outcome_per_ply(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI3_WEIGHTS)
+            result_white_fti3_w = predict_outcome_windowed(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI3_WEIGHTS)
+            result_black_fti3_pp = predict_outcome_per_ply(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI3_WEIGHTS)
+            result_black_fti3_w = predict_outcome_windowed(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI3_WEIGHTS)
+            
+            # Run predictions for both sides - FTI4
+            result_white_fti4_pp = predict_outcome_per_ply(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI4_WEIGHTS)
+            result_white_fti4_w = predict_outcome_windowed(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI4_WEIGHTS)
+            result_black_fti4_pp = predict_outcome_per_ply(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI4_WEIGHTS)
+            result_black_fti4_w = predict_outcome_windowed(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI4_WEIGHTS)
+            
+            # Run predictions for both sides - FTI5
+            result_white_fti5_pp = predict_outcome_per_ply(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI5_WEIGHTS)
+            result_white_fti5_w = predict_outcome_windowed(data, player_color='W', epsilon=FTI_EPSILON, weights=FTI5_WEIGHTS)
+            result_black_fti5_pp = predict_outcome_per_ply(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI5_WEIGHTS)
+            result_black_fti5_w = predict_outcome_windowed(data, player_color='B', epsilon=FTI_EPSILON, weights=FTI5_WEIGHTS)
             
             white_name = esc(analysis.white)
             black_name = esc(analysis.black)
             
-            # Results table for both players
+            # Helper function to generate dual FTI plot for draws
+            def generate_dual_fti_plot(result_white_w, result_black_w, fti_name, plot_suffix):
+                """Generate a dual plot (White and Black perspectives) for one FTI variant."""
+                plot_lines = []
+                if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available():
+                    try:
+                        import matplotlib
+                        matplotlib.use('Agg')
+                        import matplotlib.pyplot as plt
+                        
+                        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+                        
+                        # White's perspective
+                        if result_white_w.ft_values:
+                            plies_w = [p for p, _ in result_white_w.ft_values]
+                            ft_vals_w = [v for _, v in result_white_w.ft_values]
+                            ax1.plot(plies_w, ft_vals_w, 'b-', linewidth=2.0)
+                            ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+                            # Epsilon threshold lines
+                            ax1.axhline(y=FTI_EPSILON, color='orange', linestyle=':', linewidth=1.0, alpha=0.7)
+                            ax1.axhline(y=-FTI_EPSILON, color='orange', linestyle=':', linewidth=1.0, alpha=0.7)
+                            ax1.fill_between(plies_w, ft_vals_w, 0,
+                                            where=[v > 0 for v in ft_vals_w],
+                                            alpha=0.3, color='green')
+                            ax1.fill_between(plies_w, ft_vals_w, 0,
+                                            where=[v <= 0 for v in ft_vals_w],
+                                            alpha=0.3, color='red')
+                        ax1.set_xlabel('Ply')
+                        ax1.set_ylabel(f'Fireteam Index ({fti_name})')
+                        ax1.set_title(f"White's Perspective ({analysis.white})")
+                        ax1.grid(True, alpha=0.3)
+                        
+                        # Black's perspective
+                        if result_black_w.ft_values:
+                            plies_b = [p for p, _ in result_black_w.ft_values]
+                            ft_vals_b = [v for _, v in result_black_w.ft_values]
+                            ax2.plot(plies_b, ft_vals_b, 'b-', linewidth=2.0)
+                            ax2.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+                            # Epsilon threshold lines
+                            ax2.axhline(y=FTI_EPSILON, color='orange', linestyle=':', linewidth=1.0, alpha=0.7)
+                            ax2.axhline(y=-FTI_EPSILON, color='orange', linestyle=':', linewidth=1.0, alpha=0.7)
+                            ax2.fill_between(plies_b, ft_vals_b, 0,
+                                            where=[v > 0 for v in ft_vals_b],
+                                            alpha=0.3, color='green')
+                            ax2.fill_between(plies_b, ft_vals_b, 0,
+                                            where=[v <= 0 for v in ft_vals_b],
+                                            alpha=0.3, color='red')
+                        ax2.set_xlabel('Ply')
+                        ax2.set_ylabel(f'Fireteam Index ({fti_name})')
+                        ax2.set_title(f"Black's Perspective ({analysis.black})")
+                        ax2.grid(True, alpha=0.3)
+                        
+                        plt.tight_layout()
+                        
+                        ft_plot_path = os.path.join(plot_output_dir, f'plot_fireteam_g{game_num}_dual_{plot_suffix}.pdf')
+                        plt.savefig(ft_plot_path, format='pdf', bbox_inches='tight')
+                        plt.close()
+                        
+                        plot_lines.extend([
+                            r"\begin{center}",
+                            rf"\includegraphics[width=0.95\textwidth]{{{ft_plot_path}}}",
+                            r"\end{center}",
+                            r"",
+                        ])
+                        
+                    except Exception as e:
+                        plot_lines.extend([
+                            rf"(Plot generation failed: {esc(str(e))})",
+                            r"",
+                        ])
+                return plot_lines
+            
+            # FTI1: table then plot
             lines.extend([
+                r"",
+                r"\paragraph{FTI1: Harmonious ($\frac{1}{4}, \frac{1}{4}, \frac{1}{4}, \frac{1}{4}$)}\ \\",
+                r"",
                 r"\begin{tabular}{llcc}",
                 r"\toprule",
                 r"\textbf{Player} & \textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak} \\",
                 r"\midrule",
-                rf"{white_name} & Per-ply & {result_white_pp.prediction} & {result_white_pp.max_streak} plies \\",
-                rf"{white_name} & Windowed & {result_white_w.prediction} & {result_white_w.max_streak} plies \\",
+                rf"{white_name} & Per-ply & {result_white_fti1_pp.prediction} & {result_white_fti1_pp.max_streak} plies \\",
+                rf"{white_name} & Windowed & {result_white_fti1_w.prediction} & {result_white_fti1_w.max_streak} plies \\",
                 r"\midrule",
-                rf"{black_name} & Per-ply & {result_black_pp.prediction} & {result_black_pp.max_streak} plies \\",
-                rf"{black_name} & Windowed & {result_black_w.prediction} & {result_black_w.max_streak} plies \\",
+                rf"{black_name} & Per-ply & {result_black_fti1_pp.prediction} & {result_black_fti1_pp.max_streak} plies \\",
+                rf"{black_name} & Windowed & {result_black_fti1_w.prediction} & {result_black_fti1_w.max_streak} plies \\",
                 r"\bottomrule",
                 r"\end{tabular}",
                 r"",
             ])
+            lines.extend(generate_dual_fti_plot(result_white_fti1_w, result_black_fti1_w, "FTI1", "fti1"))
             
-            # Interpretation for draws
-            white_predicted_win = result_white_pp.prediction == "WIN" or result_white_w.prediction == "WIN"
-            black_predicted_win = result_black_pp.prediction == "WIN" or result_black_w.prediction == "WIN"
+            # FTI2: table then plot
+            lines.extend([
+                r"",
+                r"\paragraph{FTI2: Tactical ($0.6, 0.1, 0, 0.3$)}\ \\",
+                r"",
+                r"\begin{tabular}{llcc}",
+                r"\toprule",
+                r"\textbf{Player} & \textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak} \\",
+                r"\midrule",
+                rf"{white_name} & Per-ply & {result_white_fti2_pp.prediction} & {result_white_fti2_pp.max_streak} plies \\",
+                rf"{white_name} & Windowed & {result_white_fti2_w.prediction} & {result_white_fti2_w.max_streak} plies \\",
+                r"\midrule",
+                rf"{black_name} & Per-ply & {result_black_fti2_pp.prediction} & {result_black_fti2_pp.max_streak} plies \\",
+                rf"{black_name} & Windowed & {result_black_fti2_w.prediction} & {result_black_fti2_w.max_streak} plies \\",
+                r"\bottomrule",
+                r"\end{tabular}",
+                r"",
+            ])
+            lines.extend(generate_dual_fti_plot(result_white_fti2_w, result_black_fti2_w, "FTI2", "fti2"))
+            
+            # FTI3: table then plot
+            lines.extend([
+                r"",
+                r"\paragraph{FTI3: Strategic ($0.7, 0.1, 0.1, 0.1$)}\ \\",
+                r"",
+                r"\begin{tabular}{llcc}",
+                r"\toprule",
+                r"\textbf{Player} & \textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak} \\",
+                r"\midrule",
+                rf"{white_name} & Per-ply & {result_white_fti3_pp.prediction} & {result_white_fti3_pp.max_streak} plies \\",
+                rf"{white_name} & Windowed & {result_white_fti3_w.prediction} & {result_white_fti3_w.max_streak} plies \\",
+                r"\midrule",
+                rf"{black_name} & Per-ply & {result_black_fti3_pp.prediction} & {result_black_fti3_pp.max_streak} plies \\",
+                rf"{black_name} & Windowed & {result_black_fti3_w.prediction} & {result_black_fti3_w.max_streak} plies \\",
+                r"\bottomrule",
+                r"\end{tabular}",
+                r"",
+            ])
+            lines.extend(generate_dual_fti_plot(result_white_fti3_w, result_black_fti3_w, "FTI3", "fti3"))
+            
+            # FTI4: table then plot
+            lines.extend([
+                r"",
+                r"\paragraph{FTI4: Dynamic ($0.2, 0.6, 0, 0.2$)}\ \\",
+                r"",
+                r"\begin{tabular}{llcc}",
+                r"\toprule",
+                r"\textbf{Player} & \textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak} \\",
+                r"\midrule",
+                rf"{white_name} & Per-ply & {result_white_fti4_pp.prediction} & {result_white_fti4_pp.max_streak} plies \\",
+                rf"{white_name} & Windowed & {result_white_fti4_w.prediction} & {result_white_fti4_w.max_streak} plies \\",
+                r"\midrule",
+                rf"{black_name} & Per-ply & {result_black_fti4_pp.prediction} & {result_black_fti4_pp.max_streak} plies \\",
+                rf"{black_name} & Windowed & {result_black_fti4_w.prediction} & {result_black_fti4_w.max_streak} plies \\",
+                r"\bottomrule",
+                r"\end{tabular}",
+                r"",
+            ])
+            lines.extend(generate_dual_fti_plot(result_white_fti4_w, result_black_fti4_w, "FTI4", "fti4"))
+            
+            # FTI5: table then plot
+            lines.extend([
+                r"",
+                r"\paragraph{FTI5: Solid ($0.3, 0.2, 0.5, 0$)}\ \\",
+                r"",
+                r"\begin{tabular}{llcc}",
+                r"\toprule",
+                r"\textbf{Player} & \textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak} \\",
+                r"\midrule",
+                rf"{white_name} & Per-ply & {result_white_fti5_pp.prediction} & {result_white_fti5_pp.max_streak} plies \\",
+                rf"{white_name} & Windowed & {result_white_fti5_w.prediction} & {result_white_fti5_w.max_streak} plies \\",
+                r"\midrule",
+                rf"{black_name} & Per-ply & {result_black_fti5_pp.prediction} & {result_black_fti5_pp.max_streak} plies \\",
+                rf"{black_name} & Windowed & {result_black_fti5_w.prediction} & {result_black_fti5_w.max_streak} plies \\",
+                r"\bottomrule",
+                r"\end{tabular}",
+                r"",
+            ])
+            lines.extend(generate_dual_fti_plot(result_white_fti5_w, result_black_fti5_w, "FTI5", "fti5"))
+            
+            # Interpretation for draws - based on FTI1 (balanced)
+            white_predicted_win_fti1 = result_white_fti1_pp.prediction == "WIN" or result_white_fti1_w.prediction == "WIN"
+            black_predicted_win_fti1 = result_black_fti1_pp.prediction == "WIN" or result_black_fti1_w.prediction == "WIN"
+            # FTI2 predictions
+            white_predicted_win_fti2 = result_white_fti2_pp.prediction == "WIN" or result_white_fti2_w.prediction == "WIN"
+            black_predicted_win_fti2 = result_black_fti2_pp.prediction == "WIN" or result_black_fti2_w.prediction == "WIN"
+            # FTI3 predictions
+            white_predicted_win_fti3 = result_white_fti3_pp.prediction == "WIN" or result_white_fti3_w.prediction == "WIN"
+            black_predicted_win_fti3 = result_black_fti3_pp.prediction == "WIN" or result_black_fti3_w.prediction == "WIN"
+            # FTI4 predictions
+            white_predicted_win_fti4 = result_white_fti4_pp.prediction == "WIN" or result_white_fti4_w.prediction == "WIN"
+            black_predicted_win_fti4 = result_black_fti4_pp.prediction == "WIN" or result_black_fti4_w.prediction == "WIN"
+            # FTI5 predictions
+            white_predicted_win_fti5 = result_white_fti5_pp.prediction == "WIN" or result_white_fti5_w.prediction == "WIN"
+            black_predicted_win_fti5 = result_black_fti5_pp.prediction == "WIN" or result_black_fti5_w.prediction == "WIN"
             
             lines.append(r"\paragraph{Interpretation.}")
-            if white_predicted_win and black_predicted_win:
+            if white_predicted_win_fti1 and black_predicted_win_fti1:
                 lines.append(
                     r"Both players achieved sustained positional dominance at different points in the game. "
-                    r"The FT Index predicted wins for both sides, reflecting a hard-fought battle where "
+                    r"The FTI1 Index predicted wins for both sides, reflecting a hard-fought battle where "
                     r"momentum shifted. The draw is a reasonable outcome given the mutual winning chances."
                 )
                 # For stats: if both predicted WIN, we count this as "neither fully correct"
-                # but it's a reasonable draw
                 if prediction_stats is not None:
                     prediction_stats['games_with_prediction'] += 1
-                    # Neither side's WIN prediction was correct (it was a draw)
-            elif white_predicted_win:
+            elif white_predicted_win_fti1:
                 lines.append(
-                    rf"White ({white_name}) achieved sustained positional dominance, with the FT Index "
+                    rf"White ({white_name}) achieved sustained positional dominance, with FTI1 "
                     r"predicting a win. However, the game ended in a draw, suggesting Black successfully "
                     r"defended or White failed to convert the advantage."
                 )
                 if prediction_stats is not None:
                     prediction_stats['games_with_prediction'] += 1
-                    # White's WIN prediction was incorrect
-            elif black_predicted_win:
+            elif black_predicted_win_fti1:
                 lines.append(
-                    rf"Black ({black_name}) achieved sustained positional dominance, with the FT Index "
+                    rf"Black ({black_name}) achieved sustained positional dominance, with FTI1 "
                     r"predicting a win. However, the game ended in a draw, suggesting White successfully "
                     r"defended or Black failed to convert the advantage."
                 )
                 if prediction_stats is not None:
                     prediction_stats['games_with_prediction'] += 1
-                    # Black's WIN prediction was incorrect
             else:
                 lines.append(
-                    r"Neither player achieved sustained positional dominance according to the FT Index. "
+                    r"Neither player achieved sustained positional dominance according to FTI1. "
                     r"Both algorithms predicted DRAW for both sides, which matches the actual result. "
                     r"This suggests a balanced game where neither side established lasting control."
                 )
                 if prediction_stats is not None:
                     prediction_stats['games_with_prediction'] += 1
-                    prediction_stats['per_ply_correct'] += 1
-                    prediction_stats['windowed_correct'] += 1
+                    prediction_stats['fti1_per_ply_correct'] += 1
+                    prediction_stats['fti1_windowed_correct'] += 1
+                    # Also track FTI2, FTI3, FTI4, FTI5 for draws
+                    if not (white_predicted_win_fti2 or black_predicted_win_fti2):
+                        prediction_stats['fti2_per_ply_correct'] += 1
+                        prediction_stats['fti2_windowed_correct'] += 1
+                    if not (white_predicted_win_fti3 or black_predicted_win_fti3):
+                        prediction_stats['fti3_per_ply_correct'] += 1
+                        prediction_stats['fti3_windowed_correct'] += 1
+                    if not (white_predicted_win_fti4 or black_predicted_win_fti4):
+                        prediction_stats['fti4_per_ply_correct'] += 1
+                        prediction_stats['fti4_windowed_correct'] += 1
+                    if not (white_predicted_win_fti5 or black_predicted_win_fti5):
+                        prediction_stats['fti5_per_ply_correct'] += 1
+                        prediction_stats['fti5_windowed_correct'] += 1
             
             lines.append(r"")
             
-            # Generate dual FT plot if requested
-            if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available():
-                try:
-                    import matplotlib
-                    matplotlib.use('Agg')
-                    import matplotlib.pyplot as plt
-                    
-                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-                    
-                    # White's perspective
-                    if result_white_w.ft_values:
-                        plies_w = [p for p, _ in result_white_w.ft_values]
-                        ft_vals_w = [v for _, v in result_white_w.ft_values]
-                        ax1.plot(plies_w, ft_vals_w, 'b-', linewidth=2.0)
-                        ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
-                        ax1.fill_between(plies_w, ft_vals_w, 0,
-                                        where=[v > 0 for v in ft_vals_w],
-                                        alpha=0.3, color='green')
-                        ax1.fill_between(plies_w, ft_vals_w, 0,
-                                        where=[v <= 0 for v in ft_vals_w],
-                                        alpha=0.3, color='red')
-                    ax1.set_xlabel('Ply')
-                    ax1.set_ylabel('Fireteam Index')
-                    ax1.set_title(f"White's Perspective ({analysis.white})")
-                    ax1.grid(True, alpha=0.3)
-                    
-                    # Black's perspective
-                    if result_black_w.ft_values:
-                        plies_b = [p for p, _ in result_black_w.ft_values]
-                        ft_vals_b = [v for _, v in result_black_w.ft_values]
-                        ax2.plot(plies_b, ft_vals_b, 'b-', linewidth=2.0)
-                        ax2.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
-                        ax2.fill_between(plies_b, ft_vals_b, 0,
-                                        where=[v > 0 for v in ft_vals_b],
-                                        alpha=0.3, color='green')
-                        ax2.fill_between(plies_b, ft_vals_b, 0,
-                                        where=[v <= 0 for v in ft_vals_b],
-                                        alpha=0.3, color='red')
-                    ax2.set_xlabel('Ply')
-                    ax2.set_ylabel('Fireteam Index')
-                    ax2.set_title(f"Black's Perspective ({analysis.black})")
-                    ax2.grid(True, alpha=0.3)
-                    
-                    plt.tight_layout()
-                    
-                    ft_plot_path = os.path.join(plot_output_dir, f'plot_fireteam_g{game_num}_dual.pdf')
-                    plt.savefig(ft_plot_path, format='pdf', bbox_inches='tight')
-                    plt.close()
-                    
-                    lines.extend([
-                        r"\begin{center}",
-                        rf"\includegraphics[width=0.95\textwidth]{{{ft_plot_path}}}",
-                        r"\end{center}",
-                        r"",
-                    ])
-                    
-                except Exception as e:
-                    lines.extend([
-                        rf"(Plot generation failed: {esc(str(e))})",
-                        r"",
-                    ])
-            
             return lines
         
-        # Standard single-player analysis (non-draw or specific player requested)
-        result_per_ply = predict_outcome_per_ply(
+        # Single-player analysis (non-draw or specific player requested)
+        # FTI1: Harmonious (0.25, 0.25, 0.25, 0.25)
+        result_fti1_pp = predict_outcome_per_ply(
             data, 
             player_color=player_color,
-            player_name=player_name
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI1_WEIGHTS
         )
-        result_windowed = predict_outcome_windowed(
+        result_fti1_w = predict_outcome_windowed(
             data,
             player_color=player_color,
-            player_name=player_name
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI1_WEIGHTS
+        )
+        result_fti1_bal = predict_outcome_balance(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            weights=FTI1_WEIGHTS
+        )
+        
+        # FTI2: Tactical (0.6, 0.1, 0.0, 0.3)
+        result_fti2_pp = predict_outcome_per_ply(
+            data, 
+            player_color=player_color,
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI2_WEIGHTS
+        )
+        result_fti2_w = predict_outcome_windowed(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI2_WEIGHTS
+        )
+        result_fti2_bal = predict_outcome_balance(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            weights=FTI2_WEIGHTS
+        )
+        
+        # FTI3: Strategic (0.7, 0.1, 0.1, 0.1)
+        result_fti3_pp = predict_outcome_per_ply(
+            data, 
+            player_color=player_color,
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI3_WEIGHTS
+        )
+        result_fti3_w = predict_outcome_windowed(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI3_WEIGHTS
+        )
+        result_fti3_bal = predict_outcome_balance(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            weights=FTI3_WEIGHTS
+        )
+        
+        # FTI4: Dynamic (0.2, 0.6, 0.0, 0.2)
+        result_fti4_pp = predict_outcome_per_ply(
+            data, 
+            player_color=player_color,
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI4_WEIGHTS
+        )
+        result_fti4_w = predict_outcome_windowed(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI4_WEIGHTS
+        )
+        result_fti4_bal = predict_outcome_balance(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            weights=FTI4_WEIGHTS
+        )
+        
+        # FTI5: Solid (0.3, 0.2, 0.5, 0.0)
+        result_fti5_pp = predict_outcome_per_ply(
+            data, 
+            player_color=player_color,
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI5_WEIGHTS
+        )
+        result_fti5_w = predict_outcome_windowed(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            epsilon=0.25,
+            weights=FTI5_WEIGHTS
+        )
+        result_fti5_bal = predict_outcome_balance(
+            data,
+            player_color=player_color,
+            player_name=player_name,
+            weights=FTI5_WEIGHTS
         )
         
         # Determine player display name
@@ -3462,18 +4039,163 @@ class EnhancedLaTeXReportGenerator:
             r"",
         ])
         
-        # Compact results table
+        # Helper function to generate FTI plot
+        def generate_fti_plot(result_pp, result_w, fti_name, plot_suffix):
+            """Generate a plot for one FTI variant and return LaTeX lines."""
+            plot_lines = []
+            if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available():
+                try:
+                    import matplotlib
+                    matplotlib.use('Agg')
+                    import matplotlib.pyplot as plt
+                    
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    
+                    # Per-ply values
+                    if result_pp.ft_values:
+                        plies = [p for p, _ in result_pp.ft_values]
+                        ft_vals = [v for _, v in result_pp.ft_values]
+                        ax.plot(plies, ft_vals, 'b-', linewidth=0.8, alpha=0.5, label=f'Raw {fti_name}')
+                    
+                    # Windowed values (thicker line)
+                    if result_w.ft_values:
+                        plies_w = [p for p, _ in result_w.ft_values]
+                        ft_vals_w = [v for _, v in result_w.ft_values]
+                        ax.plot(plies_w, ft_vals_w, 'b-', linewidth=2.0, label=f'Smoothed {fti_name}')
+                    
+                    ax.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+                    # Epsilon threshold lines
+                    ax.axhline(y=FTI_EPSILON, color='orange', linestyle=':', linewidth=1.0, alpha=0.7, label=f'ε = {FTI_EPSILON}')
+                    ax.axhline(y=-FTI_EPSILON, color='orange', linestyle=':', linewidth=1.0, alpha=0.7)
+                    
+                    # Use windowed values for fill if available, else raw
+                    fill_plies = plies_w if result_w.ft_values else plies
+                    fill_vals = ft_vals_w if result_w.ft_values else ft_vals
+                    
+                    if fill_plies and fill_vals:
+                        ax.fill_between(fill_plies, fill_vals, 0,
+                                       where=[v > 0 for v in fill_vals],
+                                       alpha=0.3, color='green')
+                        ax.fill_between(fill_plies, fill_vals, 0,
+                                       where=[v <= 0 for v in fill_vals],
+                                       alpha=0.3, color='red')
+                    
+                    ax.set_xlabel('Ply')
+                    ax.set_ylabel(f'Fireteam Index ({display_name})')
+                    ax.set_title(f'Fireteam Index Evolution ({fti_name})')
+                    ax.legend(loc='best')
+                    ax.grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    
+                    # Save with game_num and FTI variant for uniqueness
+                    ft_plot_path = os.path.join(plot_output_dir, f'plot_fireteam_g{game_num}_{plot_suffix}.pdf')
+                    plt.savefig(ft_plot_path, format='pdf', bbox_inches='tight')
+                    plt.close()
+                    
+                    plot_lines.extend([
+                        r"\begin{center}",
+                        rf"\includegraphics[width=0.85\textwidth]{{{ft_plot_path}}}",
+                        r"\end{center}",
+                        r"",
+                    ])
+                    
+                except Exception as e:
+                    plot_lines.extend([
+                        rf"(Plot generation failed: {esc(str(e))})",
+                        r"",
+                    ])
+            return plot_lines
+        
+        # FTI1: Harmonious - table and plot
         lines.extend([
+            r"",
+            r"\paragraph{FTI1: Harmonious ($\frac{1}{4}, \frac{1}{4}, \frac{1}{4}, \frac{1}{4}$)}\ \\",
+            r"",
             r"\begin{tabular}{lcc}",
             r"\toprule",
-            r"\textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak} \\",
+            r"\textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak / Confidence} \\",
             r"\midrule",
-            rf"Per-ply (raw) & {result_per_ply.prediction} & {result_per_ply.max_streak} plies \\",
-            rf"Windowed (smoothed) & {result_windowed.prediction} & {result_windowed.max_streak} plies \\",
+            rf"Per-ply & {result_fti1_pp.prediction} & {result_fti1_pp.max_streak} plies \\",
+            rf"Windowed & {result_fti1_w.prediction} & {result_fti1_w.max_streak} plies \\",
+            rf"Balance & {result_fti1_bal.prediction} & $B_n$={result_fti1_bal.balance_norm:+.2f}, C={result_fti1_bal.confidence:.2f} \\",
             r"\bottomrule",
             r"\end{tabular}",
             r"",
         ])
+        lines.extend(generate_fti_plot(result_fti1_pp, result_fti1_w, "FTI1", "fti1"))
+        
+        # FTI2: Tactical - table and plot
+        lines.extend([
+            r"",
+            r"\paragraph{FTI2: Tactical ($0.6, 0.1, 0, 0.3$)}\ \\",
+            r"",
+            r"\begin{tabular}{lcc}",
+            r"\toprule",
+            r"\textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak / Confidence} \\",
+            r"\midrule",
+            rf"Per-ply & {result_fti2_pp.prediction} & {result_fti2_pp.max_streak} plies \\",
+            rf"Windowed & {result_fti2_w.prediction} & {result_fti2_w.max_streak} plies \\",
+            rf"Balance & {result_fti2_bal.prediction} & $B_n$={result_fti2_bal.balance_norm:+.2f}, C={result_fti2_bal.confidence:.2f} \\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"",
+        ])
+        lines.extend(generate_fti_plot(result_fti2_pp, result_fti2_w, "FTI2", "fti2"))
+        
+        # FTI3: Strategic - table and plot
+        lines.extend([
+            r"",
+            r"\paragraph{FTI3: Strategic ($0.7, 0.1, 0.1, 0.1$)}\ \\",
+            r"",
+            r"\begin{tabular}{lcc}",
+            r"\toprule",
+            r"\textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak / Confidence} \\",
+            r"\midrule",
+            rf"Per-ply & {result_fti3_pp.prediction} & {result_fti3_pp.max_streak} plies \\",
+            rf"Windowed & {result_fti3_w.prediction} & {result_fti3_w.max_streak} plies \\",
+            rf"Balance & {result_fti3_bal.prediction} & $B_n$={result_fti3_bal.balance_norm:+.2f}, C={result_fti3_bal.confidence:.2f} \\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"",
+        ])
+        lines.extend(generate_fti_plot(result_fti3_pp, result_fti3_w, "FTI3", "fti3"))
+        
+        # FTI4: Dynamic - table and plot
+        lines.extend([
+            r"",
+            r"\paragraph{FTI4: Dynamic ($0.2, 0.6, 0, 0.2$)}\ \\",
+            r"",
+            r"\begin{tabular}{lcc}",
+            r"\toprule",
+            r"\textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak / Confidence} \\",
+            r"\midrule",
+            rf"Per-ply & {result_fti4_pp.prediction} & {result_fti4_pp.max_streak} plies \\",
+            rf"Windowed & {result_fti4_w.prediction} & {result_fti4_w.max_streak} plies \\",
+            rf"Balance & {result_fti4_bal.prediction} & $B_n$={result_fti4_bal.balance_norm:+.2f}, C={result_fti4_bal.confidence:.2f} \\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"",
+        ])
+        lines.extend(generate_fti_plot(result_fti4_pp, result_fti4_w, "FTI4", "fti4"))
+        
+        # FTI5: Solid - table and plot
+        lines.extend([
+            r"",
+            r"\paragraph{FTI5: Solid ($0.3, 0.2, 0.5, 0$)}\ \\",
+            r"",
+            r"\begin{tabular}{lcc}",
+            r"\toprule",
+            r"\textbf{Algorithm} & \textbf{Prediction} & \textbf{Max Streak / Confidence} \\",
+            r"\midrule",
+            rf"Per-ply & {result_fti5_pp.prediction} & {result_fti5_pp.max_streak} plies \\",
+            rf"Windowed & {result_fti5_w.prediction} & {result_fti5_w.max_streak} plies \\",
+            rf"Balance & {result_fti5_bal.prediction} & $B_n$={result_fti5_bal.balance_norm:+.2f}, C={result_fti5_bal.confidence:.2f} \\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"",
+        ])
+        lines.extend(generate_fti_plot(result_fti5_pp, result_fti5_w, "FTI5", "fti5"))
         
         # Determine actual result for comparison
         actual_result = analysis.result
@@ -3487,89 +4209,155 @@ class EnhancedLaTeXReportGenerator:
         else:
             actual_outcome = "LOSS"
         
-        per_ply_correct = (result_per_ply.prediction == "WIN" and player_won) or \
-                         (result_per_ply.prediction == "DRAW" and (was_draw or not player_won))
-        windowed_correct = (result_windowed.prediction == "WIN" and player_won) or \
-                          (result_windowed.prediction == "DRAW" and (was_draw or not player_won))
+        # FTI1 correctness
+        fti1_pp_correct = (result_fti1_pp.prediction == "WIN" and player_won) or \
+                         (result_fti1_pp.prediction == "DRAW" and (was_draw or not player_won))
+        fti1_w_correct = (result_fti1_w.prediction == "WIN" and player_won) or \
+                        (result_fti1_w.prediction == "DRAW" and (was_draw or not player_won))
+        fti1_bal_correct = (result_fti1_bal.prediction == "WIN" and player_won) or \
+                          (result_fti1_bal.prediction == "DRAW" and was_draw) or \
+                          (result_fti1_bal.prediction == "LOSS" and not player_won and not was_draw)
+        
+        # FTI2 correctness
+        fti2_pp_correct = (result_fti2_pp.prediction == "WIN" and player_won) or \
+                         (result_fti2_pp.prediction == "DRAW" and (was_draw or not player_won))
+        fti2_w_correct = (result_fti2_w.prediction == "WIN" and player_won) or \
+                        (result_fti2_w.prediction == "DRAW" and (was_draw or not player_won))
+        fti2_bal_correct = (result_fti2_bal.prediction == "WIN" and player_won) or \
+                          (result_fti2_bal.prediction == "DRAW" and was_draw) or \
+                          (result_fti2_bal.prediction == "LOSS" and not player_won and not was_draw)
+        
+        # FTI3 correctness
+        fti3_pp_correct = (result_fti3_pp.prediction == "WIN" and player_won) or \
+                         (result_fti3_pp.prediction == "DRAW" and (was_draw or not player_won))
+        fti3_w_correct = (result_fti3_w.prediction == "WIN" and player_won) or \
+                        (result_fti3_w.prediction == "DRAW" and (was_draw or not player_won))
+        fti3_bal_correct = (result_fti3_bal.prediction == "WIN" and player_won) or \
+                          (result_fti3_bal.prediction == "DRAW" and was_draw) or \
+                          (result_fti3_bal.prediction == "LOSS" and not player_won and not was_draw)
+        
+        # FTI4 correctness
+        fti4_pp_correct = (result_fti4_pp.prediction == "WIN" and player_won) or \
+                         (result_fti4_pp.prediction == "DRAW" and (was_draw or not player_won))
+        fti4_w_correct = (result_fti4_w.prediction == "WIN" and player_won) or \
+                        (result_fti4_w.prediction == "DRAW" and (was_draw or not player_won))
+        fti4_bal_correct = (result_fti4_bal.prediction == "WIN" and player_won) or \
+                          (result_fti4_bal.prediction == "DRAW" and was_draw) or \
+                          (result_fti4_bal.prediction == "LOSS" and not player_won and not was_draw)
+        
+        # FTI5 correctness
+        fti5_pp_correct = (result_fti5_pp.prediction == "WIN" and player_won) or \
+                         (result_fti5_pp.prediction == "DRAW" and (was_draw or not player_won))
+        fti5_w_correct = (result_fti5_w.prediction == "WIN" and player_won) or \
+                        (result_fti5_w.prediction == "DRAW" and (was_draw or not player_won))
+        fti5_bal_correct = (result_fti5_bal.prediction == "WIN" and player_won) or \
+                          (result_fti5_bal.prediction == "DRAW" and was_draw) or \
+                          (result_fti5_bal.prediction == "LOSS" and not player_won and not was_draw)
         
         # Update prediction stats if provided
         if prediction_stats is not None:
             prediction_stats['games_with_prediction'] += 1
-            if per_ply_correct:
-                prediction_stats['per_ply_correct'] += 1
-            if windowed_correct:
-                prediction_stats['windowed_correct'] += 1
+            if fti1_pp_correct:
+                prediction_stats['fti1_per_ply_correct'] += 1
+            if fti1_w_correct:
+                prediction_stats['fti1_windowed_correct'] += 1
+            if fti1_bal_correct:
+                prediction_stats['fti1_balance_correct'] += 1
+            if fti2_pp_correct:
+                prediction_stats['fti2_per_ply_correct'] += 1
+            if fti2_w_correct:
+                prediction_stats['fti2_windowed_correct'] += 1
+            if fti2_bal_correct:
+                prediction_stats['fti2_balance_correct'] += 1
+            if fti3_pp_correct:
+                prediction_stats['fti3_per_ply_correct'] += 1
+            if fti3_w_correct:
+                prediction_stats['fti3_windowed_correct'] += 1
+            if fti3_bal_correct:
+                prediction_stats['fti3_balance_correct'] += 1
+            if fti4_pp_correct:
+                prediction_stats['fti4_per_ply_correct'] += 1
+            if fti4_w_correct:
+                prediction_stats['fti4_windowed_correct'] += 1
+            if fti4_bal_correct:
+                prediction_stats['fti4_balance_correct'] += 1
+            if fti5_pp_correct:
+                prediction_stats['fti5_per_ply_correct'] += 1
+            if fti5_w_correct:
+                prediction_stats['fti5_windowed_correct'] += 1
+            if fti5_bal_correct:
+                prediction_stats['fti5_balance_correct'] += 1
+            
+            # Collect data for linear regression (optimal weights)
+            # Compute per-ply deltas from winner's perspective
+            if 'regression_data' in prediction_stats:
+                # Determine outcome value: 1.0=win, 0.5=draw, 0.0=loss
+                if was_draw:
+                    outcome = 0.5
+                elif player_won:
+                    outcome = 1.0
+                else:
+                    outcome = 0.0
+                
+                # Collect deltas from tracked player's perspective
+                deltas = []
+                for row in data:
+                    ply = row['ply']
+                    if any(row[k] is None for k in ['space_w', 'space_b', 'mob_w', 'mob_b',
+                                                     'ks_w', 'ks_b', 'threats_w', 'threats_b']):
+                        continue
+                    
+                    dS = row['space_w'] - row['space_b']
+                    dM = row['mob_w'] - row['mob_b']
+                    dK = row['ks_w'] - row['ks_b']
+                    dT = (row['threats_w'] - row['threats_b']) / THREATS_SCALE_FACTOR
+                    
+                    # Flip to tracked player's perspective if Black
+                    if player_color.upper() == "B":
+                        dS, dM, dK, dT = -dS, -dM, -dK, -dT
+                    
+                    deltas.append((ply, dS, dM, dK, dT))
+                
+                if deltas:
+                    prediction_stats['regression_data'].append({
+                        'outcome': outcome,
+                        'deltas': deltas
+                    })
         
         lines.extend([
             rf"Actual result: {esc(actual_result)} ({display_name}'s outcome: {actual_outcome})",
             r"",
         ])
         
-        # Correctness indicators
-        pp_mark = r"\textcolor{green}{$\checkmark$}" if per_ply_correct else r"\textcolor{red}{$\times$}"
-        w_mark = r"\textcolor{green}{$\checkmark$}" if windowed_correct else r"\textcolor{red}{$\times$}"
+        # Correctness indicators for all variants
+        fti1_pp_mark = r"\textcolor{green}{$\checkmark$}" if fti1_pp_correct else r"\textcolor{red}{$\times$}"
+        fti1_w_mark = r"\textcolor{green}{$\checkmark$}" if fti1_w_correct else r"\textcolor{red}{$\times$}"
+        fti1_bal_mark = r"\textcolor{green}{$\checkmark$}" if fti1_bal_correct else r"\textcolor{red}{$\times$}"
+        fti2_pp_mark = r"\textcolor{green}{$\checkmark$}" if fti2_pp_correct else r"\textcolor{red}{$\times$}"
+        fti2_w_mark = r"\textcolor{green}{$\checkmark$}" if fti2_w_correct else r"\textcolor{red}{$\times$}"
+        fti2_bal_mark = r"\textcolor{green}{$\checkmark$}" if fti2_bal_correct else r"\textcolor{red}{$\times$}"
+        fti3_pp_mark = r"\textcolor{green}{$\checkmark$}" if fti3_pp_correct else r"\textcolor{red}{$\times$}"
+        fti3_w_mark = r"\textcolor{green}{$\checkmark$}" if fti3_w_correct else r"\textcolor{red}{$\times$}"
+        fti3_bal_mark = r"\textcolor{green}{$\checkmark$}" if fti3_bal_correct else r"\textcolor{red}{$\times$}"
+        fti4_pp_mark = r"\textcolor{green}{$\checkmark$}" if fti4_pp_correct else r"\textcolor{red}{$\times$}"
+        fti4_w_mark = r"\textcolor{green}{$\checkmark$}" if fti4_w_correct else r"\textcolor{red}{$\times$}"
+        fti4_bal_mark = r"\textcolor{green}{$\checkmark$}" if fti4_bal_correct else r"\textcolor{red}{$\times$}"
+        fti5_pp_mark = r"\textcolor{green}{$\checkmark$}" if fti5_pp_correct else r"\textcolor{red}{$\times$}"
+        fti5_w_mark = r"\textcolor{green}{$\checkmark$}" if fti5_w_correct else r"\textcolor{red}{$\times$}"
+        fti5_bal_mark = r"\textcolor{green}{$\checkmark$}" if fti5_bal_correct else r"\textcolor{red}{$\times$}"
         
         lines.extend([
-            rf"Per-ply: {pp_mark} \quad Windowed: {w_mark}",
+            rf"FTI1: Per-ply {fti1_pp_mark} \quad Windowed {fti1_w_mark} \quad Balance {fti1_bal_mark}",
+            r"",
+            rf"FTI2: Per-ply {fti2_pp_mark} \quad Windowed {fti2_w_mark} \quad Balance {fti2_bal_mark}",
+            r"",
+            rf"FTI3: Per-ply {fti3_pp_mark} \quad Windowed {fti3_w_mark} \quad Balance {fti3_bal_mark}",
+            r"",
+            rf"FTI4: Per-ply {fti4_pp_mark} \quad Windowed {fti4_w_mark} \quad Balance {fti4_bal_mark}",
+            r"",
+            rf"FTI5: Per-ply {fti5_pp_mark} \quad Windowed {fti5_w_mark} \quad Balance {fti5_bal_mark}",
             r"",
         ])
-        
-        # Generate FT plot if requested
-        if include_plots and PLOTTING_AVAILABLE and is_matplotlib_available():
-            try:
-                import matplotlib
-                matplotlib.use('Agg')
-                import matplotlib.pyplot as plt
-                
-                fig, ax = plt.subplots(figsize=(8, 4))
-                
-                # Per-ply values
-                if result_per_ply.ft_values:
-                    plies = [p for p, _ in result_per_ply.ft_values]
-                    ft_vals = [v for _, v in result_per_ply.ft_values]
-                    ax.plot(plies, ft_vals, 'b-', linewidth=0.8, alpha=0.5, label='Raw FT')
-                
-                # Windowed values (thicker line)
-                if result_windowed.ft_values:
-                    plies_w = [p for p, _ in result_windowed.ft_values]
-                    ft_vals_w = [v for _, v in result_windowed.ft_values]
-                    ax.plot(plies_w, ft_vals_w, 'b-', linewidth=2.0, label='Smoothed FT')
-                
-                ax.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
-                ax.fill_between(plies_w if result_windowed.ft_values else plies, 
-                               ft_vals_w if result_windowed.ft_values else ft_vals, 0,
-                               where=[v > 0 for v in (ft_vals_w if result_windowed.ft_values else ft_vals)],
-                               alpha=0.3, color='green')
-                ax.fill_between(plies_w if result_windowed.ft_values else plies,
-                               ft_vals_w if result_windowed.ft_values else ft_vals, 0,
-                               where=[v <= 0 for v in (ft_vals_w if result_windowed.ft_values else ft_vals)],
-                               alpha=0.3, color='red')
-                
-                ax.set_xlabel('Ply')
-                ax.set_ylabel(f'Fireteam Index ({display_name})')
-                ax.set_title(f'Fireteam Index Evolution')
-                ax.legend(loc='best')
-                ax.grid(True, alpha=0.3)
-                
-                plt.tight_layout()
-                
-                # Save with game_num for uniqueness
-                ft_plot_path = os.path.join(plot_output_dir, f'plot_fireteam_g{game_num}.pdf')
-                plt.savefig(ft_plot_path, format='pdf', bbox_inches='tight')
-                plt.close()
-                
-                lines.extend([
-                    r"\begin{center}",
-                    rf"\includegraphics[width=0.85\textwidth]{{{ft_plot_path}}}",
-                    r"\end{center}",
-                    r"",
-                ])
-                
-            except Exception as e:
-                lines.extend([
-                    rf"(Plot generation failed: {esc(str(e))})",
-                    r"",
-                ])
         
         return lines
 
@@ -4170,8 +4958,8 @@ def predict_outcome_per_ply(
     player_name: Optional[str] = None,
     cutoff_ply: int = 16,
     streak_length: int = 10,
-    epsilon: float = 0.0,
-    weights: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 0.1)
+    epsilon: float = FTI_EPSILON,
+    weights: Tuple[float, float, float, float] = FTI1_WEIGHTS
 ) -> PredictionResult:
     """
     Predict WIN if the specified player achieves a positive Fireteam Index
@@ -4185,9 +4973,8 @@ def predict_outcome_per_ply(
         player_name: Optional name for display (e.g., "Berliner", "Caruana")
         cutoff_ply: Ignore plies <= this value (opening phase)
         streak_length: Number of consecutive plies required (default 10 = 5 full moves)
-        epsilon: Margin threshold; FT must be > epsilon (default 0.0)
+        epsilon: Margin threshold; FT must be > epsilon (default 0.25)
         weights: Tuple (w_space, w_mobility, w_king_safety, w_threats)
-                 Default (1.0, 1.0, 1.0, 0.1) - threats are downweighted
     
     Returns:
         PredictionResult with prediction and diagnostic info
@@ -4216,7 +5003,8 @@ def predict_outcome_per_ply(
         dS = row['space_w'] - row['space_b']
         dM = row['mob_w'] - row['mob_b']
         dKS = row['ks_w'] - row['ks_b']
-        dT = row['threats_w'] - row['threats_b']
+        # Scale Threats to bring into comparable range with other metrics
+        dT = (row['threats_w'] - row['threats_b']) / THREATS_SCALE_FACTOR
         
         # Flip to player's perspective if Black
         if player_color.upper() == "B":
@@ -4280,8 +5068,8 @@ def predict_outcome_windowed(
     cutoff_ply: int = 16,
     window_size: int = 10,
     streak_length: int = 10,
-    epsilon: float = 0.0,
-    weights: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 0.1)
+    epsilon: float = FTI_EPSILON,
+    weights: Tuple[float, float, float, float] = FTI1_WEIGHTS
 ) -> PredictionResult:
     """
     Predict WIN using windowed (smoothed) averaging of the Fireteam Index.
@@ -4333,7 +5121,8 @@ def predict_outcome_windowed(
         dS = row['space_w'] - row['space_b']
         dM = row['mob_w'] - row['mob_b']
         dKS = row['ks_w'] - row['ks_b']
-        dT = row['threats_w'] - row['threats_b']
+        # Scale Threats to bring into comparable range with other metrics
+        dT = (row['threats_w'] - row['threats_b']) / THREATS_SCALE_FACTOR
         
         # Flip to player's perspective if Black
         if player_color.upper() == "B":
@@ -4404,6 +5193,493 @@ def predict_outcome_windowed(
             'weights': weights,
         }
     )
+
+
+@dataclass
+class BalancePredictionResult:
+    """
+    Result of the balance-based win prediction algorithm.
+    
+    Attributes:
+        prediction: "WIN", "DRAW", or "LOSS" (from player's perspective)
+        player_color: "W" or "B"
+        player_name: Optional name of the player being analyzed
+        balance: Raw balance score (plies_positive - plies_negative)
+        balance_norm: Normalized balance in [-1, +1]
+        stability: Number of sign changes (higher = more back-and-forth)
+        stability_norm: Normalized stability (sign_changes / max_possible)
+        confidence: Confidence score = |B_n| * (1 - V/V_threshold)
+        plies_positive: Count of plies where FTI > epsilon
+        plies_negative: Count of plies where FTI < -epsilon
+        plies_neutral: Count of plies where |FTI| <= epsilon
+        total_plies: Total plies analyzed (after cutoff)
+        avg_run_length: Average consecutive plies before sign change
+        ft_values: List of (ply, ft_value) tuples for plotting
+        algorithm: Name of the algorithm ("balance")
+        parameters: Dict of parameters used
+    """
+    prediction: str
+    player_color: str
+    player_name: Optional[str]
+    balance: int
+    balance_norm: float
+    stability: int
+    stability_norm: float
+    confidence: float
+    plies_positive: int
+    plies_negative: int
+    plies_neutral: int
+    total_plies: int
+    avg_run_length: float
+    ft_values: List[Tuple[int, float]]
+    algorithm: str
+    parameters: Dict
+
+
+def predict_outcome_balance(
+    data: List[Dict],
+    player_color: str,
+    player_name: Optional[str] = None,
+    cutoff_ply: int = 16,
+    epsilon: float = FTI_EPSILON,
+    v_ratio: float = V_RATIO,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+    weights: Tuple[float, float, float, float] = FTI1_WEIGHTS
+) -> BalancePredictionResult:
+    """
+    Predict game outcome using balance and confidence metrics.
+    
+    This algorithm counts how often each side has a meaningful advantage
+    (FTI > epsilon or FTI < -epsilon) and how often the advantage changes hands.
+    
+    Balance (B): (plies with FTI > ε) - (plies with FTI < -ε)
+    Balance_norm (B_n): B / total_plies, ranging from -1 to +1
+    
+    Volatility (V): Number of times FTI crosses zero (sign changes)
+    V_threshold: v_ratio * total_plies (scales with game length)
+    
+    Confidence: |B_n| * max(0, 1 - V/V_threshold)
+    - High when player dominated (high |B_n|) AND game was stable (low V)
+    - Low when balanced (low |B_n|) OR volatile (high V)
+    
+    Prediction logic:
+    - WIN if confidence > confidence_threshold AND B_n > 0
+    - LOSS if confidence > confidence_threshold AND B_n < 0
+    - DRAW otherwise (low confidence)
+    
+    Args:
+        data: List of dicts from parse_raw_positional_data()
+        player_color: "W" or "B" - which player's perspective to use
+        player_name: Optional name for display
+        cutoff_ply: Ignore plies <= this value (opening phase)
+        epsilon: Threshold for meaningful advantage (default 0.5)
+        v_ratio: Volatility threshold as fraction of total plies (default 0.20)
+        confidence_threshold: Minimum confidence to predict WIN/LOSS (default 0.15)
+        weights: Tuple (w_space, w_mobility, w_king_safety, w_threats)
+    
+    Returns:
+        BalancePredictionResult with prediction and diagnostic info
+    """
+    w_s, w_m, w_k, w_t = weights
+    
+    ft_values = []
+    plies_positive = 0
+    plies_negative = 0
+    plies_neutral = 0
+    sign_changes = 0
+    last_sign = 0  # -1, 0, or +1
+    
+    run_lengths = []  # Length of each "run" before sign change
+    current_run = 0
+    
+    for row in data:
+        ply = row['ply']
+        
+        # Skip if missing data
+        if any(row[k] is None for k in ['space_w', 'space_b', 'mob_w', 'mob_b',
+                                         'ks_w', 'ks_b', 'threats_w', 'threats_b']):
+            continue
+        
+        # Compute deltas (White - Black)
+        dS = row['space_w'] - row['space_b']
+        dM = row['mob_w'] - row['mob_b']
+        dKS = row['ks_w'] - row['ks_b']
+        # Scale Threats to bring into comparable range with other metrics
+        dT = (row['threats_w'] - row['threats_b']) / THREATS_SCALE_FACTOR
+        
+        # Flip to player's perspective if Black
+        if player_color.upper() == "B":
+            dS, dM, dKS, dT = -dS, -dM, -dKS, -dT
+        
+        # Weighted combination
+        F = w_s * dS + w_m * dM + w_k * dKS + w_t * dT
+        
+        ft_values.append((ply, F))
+        
+        # Skip opening phase for counting
+        if ply <= cutoff_ply:
+            continue
+        
+        # Determine current sign (with epsilon threshold)
+        if F > epsilon:
+            current_sign = 1
+            plies_positive += 1
+        elif F < -epsilon:
+            current_sign = -1
+            plies_negative += 1
+        else:
+            current_sign = 0
+            plies_neutral += 1
+        
+        # Track sign changes (only between positive and negative, not through neutral)
+        if current_sign != 0:
+            if last_sign != 0 and current_sign != last_sign:
+                sign_changes += 1
+                if current_run > 0:
+                    run_lengths.append(current_run)
+                current_run = 1
+            else:
+                current_run += 1
+            last_sign = current_sign
+        else:
+            # Neutral plies don't reset runs but don't extend them either
+            pass
+    
+    # Don't forget the final run
+    if current_run > 0:
+        run_lengths.append(current_run)
+    
+    # Compute metrics
+    total_plies = plies_positive + plies_negative + plies_neutral
+    balance = plies_positive - plies_negative
+    
+    if total_plies > 0:
+        balance_norm = balance / total_plies
+    else:
+        balance_norm = 0.0
+    
+    # Volatility threshold scales with game length
+    v_threshold = max(1, v_ratio * total_plies)
+    
+    # Stability normalization: max possible sign changes is roughly total_plies/2
+    # (alternating every ply), but that's extreme. We'll just use raw count.
+    stability = sign_changes
+    if total_plies > 1:
+        stability_norm = sign_changes / (total_plies / 2)  # 1.0 = alternating every ply
+    else:
+        stability_norm = 0.0
+    
+    # Average run length
+    if run_lengths:
+        avg_run_length = sum(run_lengths) / len(run_lengths)
+    else:
+        avg_run_length = 0.0
+    
+    # Confidence-based prediction
+    # confidence = |B_n| * max(0, 1 - V/V_threshold)
+    # High confidence requires both: decisive balance AND low volatility
+    volatility_factor = max(0.0, 1.0 - stability / v_threshold)
+    confidence = abs(balance_norm) * volatility_factor
+    
+    # Prediction logic based on confidence
+    if confidence > confidence_threshold:
+        if balance_norm > 0:
+            prediction = "WIN"
+        else:
+            prediction = "LOSS"
+    else:
+        prediction = "DRAW"
+    
+    return BalancePredictionResult(
+        prediction=prediction,
+        player_color=player_color.upper(),
+        player_name=player_name,
+        balance=balance,
+        balance_norm=balance_norm,
+        stability=stability,
+        stability_norm=stability_norm,
+        confidence=confidence,
+        plies_positive=plies_positive,
+        plies_negative=plies_negative,
+        plies_neutral=plies_neutral,
+        total_plies=total_plies,
+        avg_run_length=avg_run_length,
+        ft_values=ft_values,
+        algorithm="balance",
+        parameters={
+            'cutoff_ply': cutoff_ply,
+            'epsilon': epsilon,
+            'v_ratio': v_ratio,
+            'v_threshold': v_threshold,
+            'confidence_threshold': confidence_threshold,
+            'weights': weights,
+        }
+    )
+
+
+def compute_optimal_fti_weights(
+    regression_data: List[Dict],
+    cutoff_ply: int = 16
+) -> Optional[Tuple[Tuple[float, float, float, float], float]]:
+    """
+    Compute optimal FTI weights via linear regression on per-ply data.
+    
+    For each game, uses per-ply deltas (ΔS, ΔM, ΔK, ΔT') from the winner's perspective
+    and fits weights that best predict outcomes (1=win, 0.5=draw, 0=loss).
+    
+    Args:
+        regression_data: List of dicts, each containing:
+            - 'outcome': 1.0 for win, 0.5 for draw, 0.0 for loss
+            - 'deltas': List of (dS, dM, dK, dT) tuples for each ply (from winner's perspective)
+        cutoff_ply: Ignore plies <= this value (opening phase)
+    
+    Returns:
+        Tuple of (weights, r_squared) where weights is (w_S, w_M, w_K, w_T) normalized to sum to 1,
+        or None if regression fails (insufficient data)
+    """
+    if len(regression_data) < 3:
+        return None
+    
+    # Build design matrix X and target vector y
+    # Each game contributes one row: mean of per-ply deltas after cutoff
+    X = []  # Each row: [mean_dS, mean_dM, mean_dK, mean_dT]
+    y = []  # Each element: outcome (1, 0.5, or 0)
+    
+    for game_data in regression_data:
+        deltas = game_data['deltas']
+        outcome = game_data['outcome']
+        
+        # Filter to plies after cutoff
+        filtered_deltas = [(dS, dM, dK, dT) for ply, dS, dM, dK, dT in deltas if ply > cutoff_ply]
+        
+        if not filtered_deltas:
+            continue
+        
+        # Compute means
+        n = len(filtered_deltas)
+        mean_dS = sum(d[0] for d in filtered_deltas) / n
+        mean_dM = sum(d[1] for d in filtered_deltas) / n
+        mean_dK = sum(d[2] for d in filtered_deltas) / n
+        mean_dT = sum(d[3] for d in filtered_deltas) / n
+        
+        X.append([mean_dS, mean_dM, mean_dK, mean_dT])
+        y.append(outcome)
+    
+    if len(X) < 3:
+        return None
+    
+    # Solve least squares: X @ w = y (with constraint sum(w) = 1)
+    # We'll use unconstrained regression then normalize
+    try:
+        # Convert to simple arrays for manual computation (avoid numpy dependency)
+        n_samples = len(X)
+        n_features = 4
+        
+        # Compute X^T X
+        XtX = [[0.0] * n_features for _ in range(n_features)]
+        for i in range(n_features):
+            for j in range(n_features):
+                for k in range(n_samples):
+                    XtX[i][j] += X[k][i] * X[k][j]
+        
+        # Compute X^T y
+        Xty = [0.0] * n_features
+        for i in range(n_features):
+            for k in range(n_samples):
+                Xty[i] += X[k][i] * y[k]
+        
+        # Solve using simple Gaussian elimination (4x4 system)
+        # Augmented matrix [XtX | Xty]
+        aug = [XtX[i] + [Xty[i]] for i in range(n_features)]
+        
+        # Forward elimination with partial pivoting
+        for col in range(n_features):
+            # Find pivot
+            max_row = col
+            for row in range(col + 1, n_features):
+                if abs(aug[row][col]) > abs(aug[max_row][col]):
+                    max_row = row
+            aug[col], aug[max_row] = aug[max_row], aug[col]
+            
+            if abs(aug[col][col]) < 1e-10:
+                return None  # Singular matrix
+            
+            # Eliminate
+            for row in range(col + 1, n_features):
+                factor = aug[row][col] / aug[col][col]
+                for j in range(col, n_features + 1):
+                    aug[row][j] -= factor * aug[col][j]
+        
+        # Back substitution
+        weights_raw = [0.0] * n_features
+        for i in range(n_features - 1, -1, -1):
+            weights_raw[i] = aug[i][n_features]
+            for j in range(i + 1, n_features):
+                weights_raw[i] -= aug[i][j] * weights_raw[j]
+            weights_raw[i] /= aug[i][i]
+        
+        # Handle negative weights: set to small positive value and renormalize
+        weights_adj = [max(w, 0.01) for w in weights_raw]
+        
+        # Normalize to sum to 1
+        total = sum(weights_adj)
+        if total < 1e-10:
+            return None
+        weights_norm = tuple(w / total for w in weights_adj)
+        
+        # Compute R-squared
+        y_mean = sum(y) / len(y)
+        ss_tot = sum((yi - y_mean) ** 2 for yi in y)
+        
+        # Predicted values
+        y_pred = []
+        for row in X:
+            pred = sum(row[i] * weights_norm[i] for i in range(4))
+            y_pred.append(pred)
+        
+        ss_res = sum((y[i] - y_pred[i]) ** 2 for i in range(len(y)))
+        
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
+        
+        return (weights_norm, r_squared)
+        
+    except Exception:
+        return None
+
+
+def evaluate_optimal_weights_accuracy(
+    regression_data: List[Dict],
+    weights: Tuple[float, float, float, float],
+    cutoff_ply: int = 16,
+    streak_length: int = 10,
+    epsilon: float = FTI_EPSILON
+) -> Dict[str, int]:
+    """
+    Evaluate prediction accuracy using optimal weights on the regression data.
+    
+    Runs all three prediction algorithms (per-ply, windowed, balance) with the
+    given weights and counts correct predictions.
+    
+    Args:
+        regression_data: List of game data dicts with 'outcome' and 'deltas'
+        weights: (w_S, w_M, w_K, w_T) weights to use
+        cutoff_ply: Opening cutoff (default 16)
+        streak_length: Consecutive plies needed for WIN prediction (default 10)
+        epsilon: Threshold for meaningful advantage (default FTI_EPSILON)
+    
+    Returns:
+        Dict with counts: 'total', 'per_ply_correct', 'windowed_correct', 'balance_correct'
+    """
+    results = {
+        'total': 0,
+        'per_ply_correct': 0,
+        'windowed_correct': 0,
+        'balance_correct': 0
+    }
+    
+    for game_data in regression_data:
+        deltas = game_data['deltas']
+        outcome = game_data['outcome']  # 1.0=win, 0.5=draw, 0.0=loss
+        
+        if not deltas:
+            continue
+        
+        results['total'] += 1
+        
+        # Compute FTI values for each ply using optimal weights
+        ft_values = []
+        for ply, dS, dM, dK, dT in deltas:
+            fti = weights[0] * dS + weights[1] * dM + weights[2] * dK + weights[3] * dT
+            ft_values.append((ply, fti))
+        
+        # Filter to after cutoff
+        ft_after_cutoff = [(p, v) for p, v in ft_values if p > cutoff_ply]
+        
+        if not ft_after_cutoff:
+            continue
+        
+        # --- Per-ply algorithm ---
+        # Find longest streak of FTI > epsilon
+        max_streak = 0
+        current_streak = 0
+        for _, fti in ft_after_cutoff:
+            if fti > epsilon:
+                current_streak += 1
+                max_streak = max(max_streak, current_streak)
+            else:
+                current_streak = 0
+        
+        pp_prediction = "WIN" if max_streak >= streak_length else "DRAW"
+        
+        # --- Windowed algorithm ---
+        window_size = 10
+        smoothed = []
+        vals = [v for _, v in ft_after_cutoff]
+        for i in range(len(vals)):
+            start = max(0, i - window_size + 1)
+            window = vals[start:i+1]
+            smoothed.append(sum(window) / len(window))
+        
+        max_streak_w = 0
+        current_streak_w = 0
+        for v in smoothed:
+            if v > epsilon:
+                current_streak_w += 1
+                max_streak_w = max(max_streak_w, current_streak_w)
+            else:
+                current_streak_w = 0
+        
+        w_prediction = "WIN" if max_streak_w >= streak_length else "DRAW"
+        
+        # --- Balance algorithm ---
+        positive_plies = sum(1 for _, v in ft_after_cutoff if v > epsilon)
+        negative_plies = sum(1 for _, v in ft_after_cutoff if v < -epsilon)
+        total_plies = len(ft_after_cutoff)
+        
+        balance = positive_plies - negative_plies
+        balance_norm = balance / total_plies if total_plies > 0 else 0
+        
+        # Count sign changes (volatility)
+        sign_changes = 0
+        prev_sign = None
+        for _, v in ft_after_cutoff:
+            curr_sign = 1 if v > 0 else (-1 if v < 0 else 0)
+            if prev_sign is not None and curr_sign != 0 and prev_sign != 0 and curr_sign != prev_sign:
+                sign_changes += 1
+            if curr_sign != 0:
+                prev_sign = curr_sign
+        
+        v_threshold = max(1, V_RATIO * total_plies)
+        confidence = abs(balance_norm) * max(0.0, 1.0 - sign_changes / v_threshold)
+        
+        if confidence > CONFIDENCE_THRESHOLD and balance_norm > 0:
+            bal_prediction = "WIN"
+        elif confidence > CONFIDENCE_THRESHOLD and balance_norm < 0:
+            bal_prediction = "LOSS"
+        else:
+            bal_prediction = "DRAW"
+        
+        # --- Check correctness ---
+        # outcome: 1.0=win, 0.5=draw, 0.0=loss (from tracked player's perspective)
+        actual_win = outcome == 1.0
+        actual_draw = outcome == 0.5
+        actual_loss = outcome == 0.0
+        
+        # Per-ply: WIN or DRAW only
+        if (pp_prediction == "WIN" and actual_win) or (pp_prediction == "DRAW" and (actual_draw or actual_loss)):
+            results['per_ply_correct'] += 1
+        
+        # Windowed: WIN or DRAW only
+        if (w_prediction == "WIN" and actual_win) or (w_prediction == "DRAW" and (actual_draw or actual_loss)):
+            results['windowed_correct'] += 1
+        
+        # Balance: WIN, DRAW, or LOSS
+        if (bal_prediction == "WIN" and actual_win) or \
+           (bal_prediction == "DRAW" and actual_draw) or \
+           (bal_prediction == "LOSS" and actual_loss):
+            results['balance_correct'] += 1
+    
+    return results
 
 
 def compute_fireteam_index_for_analysis(
