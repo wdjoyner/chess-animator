@@ -1,269 +1,254 @@
-# Chess Game Analyzer (CGA, version 6s)
+# Chess Game Animator
 
-A comprehensive Python module for analyzing chess games with detailed positional metrics, generating publication-quality LaTeX reports with diagrams, and predicting game outcomes using the novel **Fireteam Index**.
+A Python pipeline that turns a PGN chess game into an annotated video using [Manim](https://www.manim.community/). Each move is animated on a live board alongside a Stockfish evaluation bar, a scrolling move list, a commentary panel, and a four-plot metrics strip showing positional trends across the whole game.
 
-## Features
-
-- **Deep positional analysis** using Stockfish's classical evaluation terms (Space, Mobility, King Safety, Threats)
-- **Publication-quality LaTeX reports** with chess diagrams, annotated moves, and metric plots
-- **Multi-game book generation** with per-chapter analysis and aggregate statistics
-- **Fireteam Index prediction** — a Rithmomachia-inspired formula for predicting winners
-- **Game character classification** (balanced/tense/tactical/chaotic, one-sided/seesaw)
-- **Brilliant sacrifice detection** and critical position highlighting
-- **Raw data export** for downstream computational analysis
-
-## Installation
-
-### Requirements
-
-```bash
-pip install python-chess matplotlib
-```
-
-You'll also need [Stockfish](https://stockfishchess.org/download/) installed. The module looks for it at `/usr/games/stockfish` by default, but you can specify a custom path.
-
-### Quick Start
-
-```python
-from chess_game_analyzer import analyze_game_with_positional_metrics
-
-# Analyze a game and generate a LaTeX report
-result = analyze_game_with_positional_metrics(
-    pgn_source="my_game.pgn",
-    output_path="analysis.tex",
-    stockfish_path="/usr/local/bin/stockfish",
-    depth=22,
-    include_plots=True
-)
-
-# Compile to PDF
-# pdflatex analysis.tex
-```
-
-## Command Line Usage
-
-### Single Game Analysis
-
-```bash
-# Basic analysis with LaTeX output
-python chess_game_analyzer.py game.pgn -o analysis.tex
-
-# With Fireteam Index prediction (tracking White)
-python chess_game_analyzer.py game.pgn -o analysis.tex --prediction W
-
-# Higher depth, custom Stockfish path
-python chess_game_analyzer.py game.pgn -o analysis.tex -d 25 -s /usr/local/bin/stockfish
-```
-
-### Multi-Game Book
-
-```bash
-# Generate a book from multiple games (prediction enabled by default)
-python chess_game_analyzer.py games.pgn --book -o book.tex --book-title "My Tournament"
-
-# Track a specific player across all games
-python chess_game_analyzer.py games.pgn --book -o book.tex --prediction-name "Carlsen"
-
-# Disable prediction section
-python chess_game_analyzer.py games.pgn --book -o book.tex --no-prediction
-```
-
-### All Options
-
-| Option | Description |
-|--------|-------------|
-| `-o, --output` | Output LaTeX file |
-| `-s, --stockfish` | Path to Stockfish executable |
-| `-d, --depth` | Analysis depth (default: 20) |
-| `-t, --time` | Time per position in seconds (default: 1.0) |
-| `--no-diagrams` | Omit chess board diagrams |
-| `--no-methodology` | Omit methodology explanation section |
-| `--no-plots` | Omit matplotlib plots |
-| `--ascii-plots` | Include ASCII plots (for environments without graphics) |
-| `--plot-dir` | Directory for plot output files |
-| `--prediction W/B` | (Single game) Track specified player for Fireteam Index |
-| `--prediction-name` | Track player by name (matches against White/Black) |
-| `--prediction-winner` | (Book mode) Track winner in decisive games (default: True) |
-| `--no-prediction` | Disable Fireteam Index prediction entirely |
-| `--book` | Generate multi-game book (LaTeX book class) |
-| `--book-title` | Title for the book |
-| `--book-author` | Author for the book |
-| `--json-output` | Export raw analysis data as JSON |
-| `-q, --quiet` | Suppress progress messages |
-
-## The Fireteam Index
-
-Inspired by Rithmomachia's "progression victory" (a well-coordinated fireteam in enemy territory), the Fireteam Index combines four positional factors:
-
-$$\text{FT} = \Delta\text{Space} + \Delta\text{Mobility} + \Delta\text{King Safety} + \frac{\Delta\text{Threats}}{10}$$
-
-Where each Δ = (Your value − Opponent's value).
-
-### Prediction Algorithms
-
-**Per-Ply Algorithm**: Looks for 10 consecutive plies (5 full moves) where the raw FT exceeds zero after the opening (ply 16).
-
-**Windowed Algorithm**: Uses a 10-ply rolling average to smooth noise before applying the same streak detection.
-
-### Handling Draws
-
-For drawn games, the Fireteam Index is analyzed from **both players' perspectives** to reveal:
-- **True draw**: Neither side achieved sustained dominance
-- **Missed win**: One side dominated but failed to convert
-- **Mutual chances**: Both sides dominated at different points
-
-The dual analysis helps identify whether draws were hard-fought battles or peaceful agreements.
-
-### Usage
-
-```python
-from chess_game_analyzer import (
-    parse_raw_positional_data,
-    predict_outcome_per_ply,
-    predict_outcome_windowed
-)
-
-# Parse data from a CGA-generated .tex file
-data = parse_raw_positional_data("analysis.tex")
-
-# Run predictions
-result_raw = predict_outcome_per_ply(data, player_color='W', player_name='Carlsen')
-result_smooth = predict_outcome_windowed(data, player_color='W', player_name='Carlsen')
-
-print(f"Per-ply prediction: {result_raw.prediction}")
-print(f"Windowed prediction: {result_smooth.prediction}")
-print(f"Max streak: {result_raw.max_streak} plies")
-print(f"Peak FT: {result_raw.peak_ft_value:.3f}")
-```
-
-## Positional Metrics
-
-The module extracts four key positional factors from Stockfish's classical evaluation:
-
-| Metric | Description |
-|--------|-------------|
-| **Space** | Control of central squares (files c-f, ranks 2-4/5-7) by pawns |
-| **Mobility** | Legal moves available to pieces, weighted by piece type |
-| **King Safety** | Pawn shield strength, king tropism, attack units near king |
-| **Threats** | Hanging pieces, attacks by lower-value pieces, king zone pressure |
-
-## Raw Data Format
-
-Analysis data is preserved after `\end{document}` in the LaTeX file for computational reuse:
-
-```
-% GAME_DATA_START
-% 1, e4, 35, 0.320, 0.390, 4.600, 4.150, 0.500, 0.380, 2.300, 1.900
-% 2, e5, 19, 0.340, 0.380, 4.700, 4.100, 0.500, 0.360, 2.600, 2.000
-...
-% GAME_DATA_END
-```
-
-Format: `ply, SAN, eval_cp, space_w, space_b, mob_w, mob_b, ks_w, ks_b, threats_w, threats_b`
-
-### Parsing Raw Data
-
-```python
-from chess_game_analyzer import parse_raw_positional_data, compute_fireteam_index
-
-# Extract data
-data = parse_raw_positional_data("analysis.tex", game_num=1)  # For multi-game books
-
-# Compute Fireteam Index
-ft_data = compute_fireteam_index(data, threats_divisor=10.0)
-
-for row in ft_data:
-    print(f"Ply {row['ply']}: FT={row['ft_white']:+.3f}")
-```
-
-## Game Character Classification
-
-Games are automatically classified based on evaluation volatility:
-
-| Classification | Spread (d) | Description |
-|----------------|------------|-------------|
-| Balanced | d < 1 | Minimal advantage shifts |
-| Tense | 1 ≤ d < 3 | Normal competitive tension |
-| Tactical | 3 ≤ d < 6 | Significant swings, complications |
-| Chaotic | d ≥ 6 | Wild swings, likely blunders |
-
-Directionality is also classified as **one-sided** (advantage never changed hands) or **seesaw** (advantage swung both ways).
-
-## Version History
-
-### v6r (Current)
-- Win prediction algorithms: `predict_outcome_per_ply()` and `predict_outcome_windowed()`
-- Fireteam Index prediction sections in LaTeX reports
-- Book mode prediction with `--prediction-name` and `--prediction-winner`
-- **Draw analysis**: Draws are now analyzed from both players' perspectives with interpretive text
-- **Methodology section**: Added comprehensive FTI explanation to Appendix
-- **Bug fix**: eval_loss now uses proper sign convention for Black moves
-- **Bug fix**: eval_loss capped at 1500cp to prevent mate score transitions from distorting accuracy statistics
-
-### v6q
-- Raw positional data preserved after `\end{document}`
-- New utility functions: `parse_raw_positional_data()`, `compute_fireteam_index()`
-
-### Earlier Versions
-- Multi-game book generation
-- Game character classification
-- Brilliant sacrifice detection
-- Multi-PV analysis with alternative move suggestions
-- Matplotlib and ASCII plot generation
+---
 
 ## Example Output
 
-The LaTeX reports include:
+The 16:9 frame is divided into three zones:
 
-1. **Game Information** — Event, players, date, opening
-2. **Player Statistics** — Accuracy, centipawn loss, move classifications
-3. **Positional Analysis** — Space, mobility, king safety, threats with plots
-4. **Annotated Game** — Move-by-move with error annotations
-5. **Critical Positions** — Diagrams at key moments with best continuations
-6. **Fireteam Index Prediction** — (Optional) Prediction results with FT evolution plot
-7. **Methodology** — (Optional) Explanation of how metrics are computed
-
-## API Reference
-
-### Main Functions
-
-```python
-# High-level analysis
-analyze_game_with_positional_metrics(pgn_source, output_path, ...)
-analyze_games_to_book(pgn_source, output_path, book_title, ...)
-
-# Prediction
-predict_outcome_per_ply(data, player_color, player_name, ...)
-predict_outcome_windowed(data, player_color, player_name, ...)
-
-# Data extraction
-parse_raw_positional_data(tex_filepath, game_num=None)
-compute_fireteam_index(data, threats_divisor=10.0)
-compute_fireteam_index_for_analysis(analysis, threats_divisor=10.0)
-get_game_count_in_tex(tex_filepath)
+```
+┌─────────────────────────────────────────────────────────┐
+│  Eval │                    │  Header (players, event)   │
+│  Bar  │   Chess Board      │  Move List                 │
+│       │                    │  Commentary / Analysis     │
+├─────────────────────────────────────────────────────────┤
+│   Eval [-4, 4]  │  Space  │  Mobility  │  King Safety  │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### Key Classes
+- **Eval bar** — white/black fill animated each move, scaled to ±4 pawns.
+- **Move list** — scrolling, color-coded by move quality (blunder = red, brilliant = teal, etc.).
+- **Commentary** — engine annotation or your own hand-written notes loaded from a text file.
+- **Metrics strip** — four plots revealed one move at a time, auto-scaled to the game's actual data range, with the range shown in the title.
+
+---
+
+## Requirements
+
+| Dependency | Notes |
+|---|---|
+| Python 3.10+ | |
+| [Manim Community](https://www.manim.community/) v0.20+ | `pip install manim` |
+| [manim-chess](https://github.com/Spijkervet/manim-chess) | Provides `Board` and `EvaluationBar` |
+| [python-chess](https://python-chess.readthedocs.io/) | `pip install chess` |
+| [Stockfish](https://stockfishchess.org/download/) | Binary on your system |
+
+Install Python dependencies:
+
+```bash
+pip install manim chess
+# install manim-chess per its own instructions
+```
+
+---
+
+## File Overview
+
+| File | Purpose |
+|---|---|
+| `run_animator.py` | **Start here.** CLI entry point — runs analysis and/or Manim. |
+| `animator_game.py` | Main Manim scene (`AnimatedGame`). Move loop, panels, metrics. |
+| `animator_layout.py` | All geometry constants, colors, and fonts in one place. |
+| `animator_initial_frame.py` | Initial frame scene and `GameInfo` dataclass. |
+| `animator_metrics.py` | Four-plot metrics strip (Eval, Space, Mobility, King Safety). |
+| `chess_game_analyzer.py` | Stockfish wrapper — produces per-move positional metrics. |
+| `convert_script_to_comment_dict.py` | Parses a `[KEY]` commentary text file into a dict. |
+| `evaluation_bar.py` | `EvaluationBar` Mobject (part of manim-chess). |
+
+---
+
+## Quick Start
+
+The repository includes `sample_game.pgn` — Caruana vs. Nepomniachtchi, Round 5 of the 2024 Candidates Tournament (Toronto), an Italian Game ending in a draw by repetition after 32 moves. All examples below use this file.
+
+### 1. Analyze and animate in one step
+
+```bash
+python run_animator.py sample_game --analyze --depth 20
+```
+
+This runs Stockfish at depth 20, saves `sample_game_analysis.json`, then renders a low-quality preview video. The `--analyze` flag is only needed the first time; subsequent renders reuse the saved JSON.
+
+### 2. Re-render without re-analyzing
+
+```bash
+python run_animator.py sample_game
+```
+
+### 3. Quality and resolution
+
+Manim's quality flag controls both resolution and frame rate together:
+
+| Flag | Resolution | FPS | Use case |
+|---|---|---|---|
+| `--quality low` | 854 × 480 | 15 | Fast preview during development |
+| `--quality medium` | 1280 × 720 | 30 | Draft review |
+| `--quality high` | 1920 × 1080 | 60 | Final YouTube/Vimeo upload |
+| `--quality ultra` | 3840 × 2160 | 60 | 4K archival render |
+
+```bash
+# Fast preview (default)
+python run_animator.py sample_game --quality low
+
+# 1080p final render, no auto-open
+python run_animator.py sample_game --quality high --no-preview
+
+# 4K archival render (slow — allow 30–60 min on a typical machine)
+python run_animator.py sample_game --quality ultra --no-preview
+```
+
+### 4. Custom Stockfish path
+
+```bash
+python run_animator.py sample_game --analyze --depth 22 \
+    --stockfish /opt/homebrew/bin/stockfish
+```
+
+Default path is `/usr/local/bin/stockfish`. On Apple Silicon Macs installed via Homebrew the binary is typically at `/opt/homebrew/bin/stockfish`.
+
+### 5. Your own game
+
+Replace `sample_game` with any base filename. The script looks for `{name}.pgn`, `{name}_analysis.json`, and optionally `{name}_notes.txt` in the current directory:
+
+```bash
+python run_animator.py my_game --analyze --depth 20
+```
+
+---
+
+## Adding Your Own Commentary
+
+Create a plain text file named `sample_game_notes.txt` (or `{game_id}_notes.txt` for your own game) in the same directory. Each entry is a ply number in square brackets — where ply 1 = White's first move, ply 2 = Black's first move, and so on — followed by your comment:
+
+```
+[1] Caruana opens with the King's Pawn, staking a central claim immediately.
+
+[10] The Italian Game — one of the oldest and most deeply analyzed openings in chess.
+
+[23] A key moment: after the exchange on e3, White's rook structure becomes more active.
+
+[47] Repetition begins. White has a slight edge but Black holds the balance.
+```
+
+Comments are word-wrapped automatically to fit the commentary panel. If no notes file is present, the panel falls back to engine annotations (move classification, centipawn loss, current evaluation).
+
+---
+
+## How the Analysis Works
+
+`chess_game_analyzer.py` runs Stockfish on each position and also computes four positional metrics directly from the board using `python-chess`:
+
+| Metric | What it measures |
+|---|---|
+| **Eval** | Stockfish centipawn evaluation, converted to pawns |
+| **Space** | Control of central territory, weighted by piece count behind the pawn chain |
+| **Mobility** | Legal moves per piece type, weighted and penalized for unsafe squares |
+| **King Safety** | Pawn shield strength, king tropism, and attack units near the king |
+
+The metrics strip auto-scales each plot to the actual range of values in the game (with 15% padding) so variation is always visible regardless of the absolute values. The range is shown next to each plot title, e.g. `King Safety [-0.22, 1.7]`.
+
+---
+
+## Testing Without a Game File
+
+A `QuickDemo` scene is included that runs without any PGN or analysis file:
+
+```bash
+python run_animator.py --scene QuickDemo
+# or directly:
+manim -pql animator_game.py QuickDemo
+```
+
+The metrics strip can also be tested independently with synthetic sine-wave data:
+
+```bash
+manim -pql animator_metrics.py MetricsDebug
+```
+
+---
+
+## Customization
+
+### Changing the eval bar scale
+
+The eval bar is currently scaled to ±4 pawns. To change it, edit `ScaledEvaluationBar._SLOPE` in `animator_game.py`:
 
 ```python
-EnhancedGameAnalyzer          # Main analysis engine
-EnhancedGameAnalysisResult    # Complete analysis result
-EnhancedMoveAnalysis          # Per-move analysis data
-PositionalEvaluation          # Positional metrics breakdown
-PredictionResult              # Fireteam Index prediction result
-EnhancedLaTeXReportGenerator  # Report generation
+# slope = 0.737063 × (10 / your_range)
+_SLOPE = 1.8427   # ±4 pawns
+_SLOPE = 0.9238   # ±8 pawns
+_SLOPE = 0.737063 # ±10 pawns (original)
 ```
+
+Also update the clamp in the animation loop:
+
+```python
+eval_pawns = max(-4.0, min(4.0, move.eval_after / 100.0))
+```
+
+### Swapping the fourth metrics plot
+
+The fourth plot is King Safety. To swap it for Threats (or FTI), edit the `_ks_w` / `_ks_b` extraction in `MetricPlotPanel.__init__` in `animator_metrics.py` and the corresponding `advance_to_move()` call. The fields available on each `MoveData` are: `space_white/black`, `mobility_white/black`, `king_safety_white/black`, `threats_white/black`, `fti1`, `fti2`, `fti3`.
+
+### Colors and fonts
+
+All colors and font sizes are in `animator_layout.py` — `ColorScheme` and `Typography` dataclasses at the top of the file.
+
+---
+
+## Example Output
+
+> **Screenshot:** To add an illustrative image to this README, render the sample game at low quality, then extract a still from the output video using ffmpeg:
+> ```bash
+> python run_animator.py sample_game --analyze --depth 20
+> # Video is saved to media/videos/animator_game/480p15/AnimatedGame.mp4
+> ffmpeg -i media/videos/animator_game/480p15/AnimatedGame.mp4 \
+>        -ss 00:00:10 -vframes 1 docs/screenshot.png
+> ```
+> Then add to this README:
+> ```markdown
+> ![Sample frame](docs/screenshot.png)
+> ```
+
+---
+
+## Data Flow
+
+```
+sample_game.pgn                          (included in repository)
+    │
+    ▼
+chess_game_analyzer.py                   (--analyze flag, run once)
+    │
+    ├──► sample_game_analysis.json       (reused on subsequent renders)
+    └──► sample_game_notes.txt           (optional, hand-written)
+
+run_animator.py
+    ├── writes sample_game_animator_config.json
+    ├── sets CHESS_ANIMATOR_CONFIG environment variable
+    └── calls: manim -pql animator_game.py AnimatedGame
+
+AnimatedGame.construct()
+    ├── loads analysis JSON  →  List[MoveData]
+    ├── builds board, eval bar, header, move list, commentary, metrics strip
+    └── for each move:
+            animate board position
+            update eval bar
+            update move list (scrolling)
+            update commentary
+            reveal next metrics segment
+```
+
+---
 
 ## License
 
-Modified BSD or MIT license, user's choice.
+MIT License. See `LICENSE` for details.
+
+---
 
 ## Author
 
-Generated for David Joyner's chess analysis pipeline, January 2026.
-
-## Acknowledgments
-
-- [python-chess](https://python-chess.readthedocs.io/) for chess logic and PGN parsing
-- [Stockfish](https://stockfishchess.org/) for position evaluation
-- The Fireteam Index concept is inspired by [Rithmomachia](https://en.wikipedia.org/wiki/Rithmomachia), the medieval "Philosophers' Game"
+David Joyner
