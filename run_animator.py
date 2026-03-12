@@ -266,6 +266,7 @@ def main():
         "pgn_path":      str(pgn_path)      if has_pgn      else None,
         "analysis_path": str(analysis_path) if has_analysis else None,
         "comments_path": str(notes_path)    if notes_path.exists() else None,
+        "stockfish_path": args.stockfish,
     }
 
     config_file = Path(f"{game_id}_animator_config.json")
