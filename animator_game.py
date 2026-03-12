@@ -2,7 +2,7 @@
 animator_game.py
 
 Animates a chess game with move-by-move analysis and commentary.
-Integrates with chess_game_analyzer.py for Stockfish annotations.
+Integrates with chess_game_analyzer6y.py for Stockfish annotations.
 
 Usage:
     # Set config path via environment variable, then run manim:
@@ -16,7 +16,7 @@ Usage:
 
 Requirements:
     - manim, manim-chess, chess
-    - chess_game_analyzer.py (for analysis)
+    - chess_game_analyzer6y.py (for analysis)
     - Stockfish (if running live analysis)
 
 Changes from previous version:
@@ -130,7 +130,7 @@ try:
 except ImportError:
     METRICS_AVAILABLE = False
 
-# FTI weight constants (mirrors chess_game_analyzer.py)
+# FTI weight constants (mirrors chess_game_analyzer6y.py)
 THREATS_SCALE_FACTOR = 20.0
 FTI1_WEIGHTS = (0.25, 0.25, 0.25, 0.25)   # Harmonious
 FTI2_WEIGHTS = (0.60, 0.10, 0.00, 0.30)   # Tactical
@@ -208,7 +208,7 @@ class MoveData:
         Build a MoveData from a JSON-decoded dict.
 
         Handles two JSON shapes:
-        1. Produced by chess_game_analyzer directly (nested positional_eval
+        1. Produced by chess_game_analyzer6y directly (nested positional_eval
            sub-dict with raw field names like space_white_mg).
         2. Produced by AnalysisData.save_to_json() via asdict() on MoveData
            (flat fields: space_white, mobility_white, etc. at top level).
@@ -288,7 +288,7 @@ class AnalysisData:
     @classmethod
     def from_json_file(cls, json_path: Path) -> "AnalysisData":
         """
-        Load analysis from a JSON file produced by chess_game_analyzer.py.
+        Load analysis from a JSON file produced by chess_game_analyzer6y.py.
 
         The JSON contains a 'moves' list where each element has a nested
         'positional_eval' dict — MoveData.from_dict() handles that unpacking.
@@ -327,13 +327,13 @@ class AnalysisData:
                       stockfish_path: str = "/usr/local/bin/stockfish",
                       depth: int = 20) -> "AnalysisData":
         """
-        Run live analysis using chess_game_analyzer.py.
+        Run live analysis using chess_game_analyzer6y.py.
         Prefer pre-computed JSON (from_json_file) for iteration speed.
         """
         try:
-            from chess_game_analyzer import EnhancedGameAnalyzer
+            from chess_game_analyzer6y import EnhancedGameAnalyzer
         except ImportError:
-            raise ImportError("chess_game_analyzer.py must be in the Python path")
+            raise ImportError("chess_game_analyzer6y.py must be in the Python path")
 
         with EnhancedGameAnalyzer(stockfish_path, depth) as analyzer:
             result = analyzer.analyze_game(str(pgn_path))
@@ -972,7 +972,7 @@ def generate_analysis_json(pgn_path: str, output_path: str = None,
                            stockfish_path: str = "/usr/local/bin/stockfish",
                            depth: int = 20):
     """
-    Generate analysis JSON from a PGN using chess_game_analyzer.
+    Generate analysis JSON from a PGN using chess_game_analyzer6y.
 
     Run this once; then use the JSON with AnimatedGame for fast iteration.
 
