@@ -1,12 +1,17 @@
-# Chess Game Analyzer - Python Dependencies
+# Chess Game Animator — Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# Also required (not pip-installable):
+#   Stockfish binary — https://stockfishchess.org/download/
+#   LaTeX distribution (for Manim text rendering) — e.g. TeX Live or MiKTeX
 
-# Core chess library (required)
-python-chess>=1.9.0
+# Core animation
+manim>=0.18.0
+manim-chess>=0.1.0
 
-# Plotting (optional - for matplotlib plots)
-matplotlib>=3.5.0
+# Chess logic and PGN/engine handling
+chess>=1.10.0
 
-# Note: Stockfish must be installed separately
-# Ubuntu/Debian: sudo apt install stockfish
-# macOS: brew install stockfish
-# Windows: https://stockfishchess.org/download/
+# Standard library modules used (no install needed):
+#   argparse, dataclasses, io, json, math, os, pathlib,
+#   re, subprocess, sys, time, typing
