@@ -728,6 +728,7 @@ class AnimatedGame(Scene):
         self.pgn_path      = cfg.get("pgn_path")
         self.analysis_path = cfg.get("analysis_path")
         self.comments_path = cfg.get("comments_path")
+        self.stockfish_path = cfg.get("stockfish_path", "/usr/local/bin/stockfish")
         self.custom_comments: Dict[str, str] = {}
 
     def _load_analysis(self) -> AnalysisData:
@@ -762,7 +763,7 @@ class AnimatedGame(Scene):
         for path in pgn_candidates:
             if path.exists():
                 print(f"Running live Stockfish analysis on {path}…")
-                return AnalysisData.from_analyzer(path)
+                return AnalysisData.from_analyzer(path, self.stockfish_path)
 
         raise FileNotFoundError(
             "No analysis JSON or PGN found. "
