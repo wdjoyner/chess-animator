@@ -61,42 +61,58 @@ from animator_initial_frame import GameInfo, create_header_panel
 
 class ScaledEvaluationBar(manim_chess.EvaluationBar):
     """
-    Subclass of manim_chess.EvaluationBar with a tighter ±4 pawn scale.
+    Subclass of manim_chess.EvaluationBar with a calibrated ±4 pawn scale.
 
-    The parent class maps ±10 pawns to the full bar height using slope
-    0.737063.  We override set_evaluation() with a steeper slope so that
-    ±4 pawns fills the same visual range:
-        new_slope = 0.737063 × (10 / 4) ≈ 1.8427
-    Everything else (geometry, text, colours) is unchanged.
+    Desired behaviour:
+        eval =  0  →  white fills exactly half the bar
+        eval = +4  →  white fills the full bar
+        eval = -4  →  white fills none of the bar
+        eval = +1  →  white advances by roughly one board square
+
+    All heights are derived at runtime from self.black_rectangle.height
+    (world units, after any scale() call) so the formula stays correct
+    regardless of EVAL_BAR_SCALE or any other transform applied externally.
+    Using the hardcoded raw value 6.18 as the max was the bug: after
+    scale(0.72) the bar is only 4.45 world units tall, so a rect_height
+    of 3.09 filled 69% of the bar instead of the intended 50%.
     """
 
-    _SLOPE = 1.8427
+    _MAX_PAWNS = 4.0   # ±this many pawns fills the bar
+    _BAR_MIN_FRAC = 0.008  # tiny floor fraction so rect never disappears
 
     def set_evaluation(self, evaluation: float):
         self.evaluation = evaluation
 
-        height_from_evaluation = self._SLOPE * self.evaluation + 3.2
-        rect_height = min(max(0.32, height_from_evaluation), 6.18)
+        # Use get_height()/get_width(): these always return actual world dimensions
+        # after any scale() call (unlike .height/.width which store unscaled values).
+        H = self.black_rectangle.get_height()   # e.g. 6.4 * 0.72 = 4.608
+        half = H / 2
+        slope = half / self._MAX_PAWNS          # world units per pawn
+
+        height_from_evaluation = slope * self.evaluation + half
+        rect_height = min(max(self._BAR_MIN_FRAC * H, height_from_evaluation), H)
         pos = self.black_rectangle.get_bottom() + np.array([0, rect_height / 2, 0])
+        W = self.black_rectangle.get_width()    # actual world width after scale()
         new_rect = (
-            Rectangle(width=0.25, height=rect_height,
+            Rectangle(width=W, height=rect_height,
                       stroke_color=self.WHITE, fill_opacity=1)
             .set_fill(self.WHITE)
             .move_to(pos)
         )
 
+        text_offset = H * 0.045   # ~4.5% of bar height for text nudge
         text_val = f'{self.evaluation:.1f}'
         if self.evaluation > 0:
             new_text = (
                 Text(text_val, font="Arial")
-                .move_to(self.black_rectangle.get_bottom() + np.array([0, 0.2, 0]))
+                .move_to(self.black_rectangle.get_bottom() + np.array([0, text_offset, 0]))
                 .set_fill(self.BLACK)
                 .scale(0.2)
             )
         else:
             new_text = (
                 Text(text_val, font="Arial")
-                .move_to(self.black_rectangle.get_top() + np.array([0, -0.2, 0]))
+                .move_to(self.black_rectangle.get_top() + np.array([0, -text_offset, 0]))
                 .set_fill(self.WHITE)
                 .scale(0.2)
             )
