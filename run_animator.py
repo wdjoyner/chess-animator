@@ -67,7 +67,7 @@ QUALITY_FLAGS = {
 def run_analysis(pgn_path: Path, output_path: Path,
                  stockfish: str, depth: int) -> bool:
     """
-    Run chess_game_analyzer6y on pgn_path and save JSON to output_path.
+    Run chess_game_analyzer on pgn_path and save JSON to output_path.
     Returns True on success.
 
     Deliberately does NOT import anything from animator_game so that
@@ -75,9 +75,9 @@ def run_analysis(pgn_path: Path, output_path: Path,
     """
     print(f"Running Stockfish analysis (depth {depth}) on {pgn_path} …")
     try:
-        from chess_game_analyzer6y import EnhancedGameAnalyzer
+        from chess_game_analyzer import EnhancedGameAnalyzer
     except ImportError:
-        print("Error: chess_game_analyzer6y.py not found on Python path.")
+        print("Error: chess_game_analyzer.py not found on Python path.")
         return False
 
     try:
