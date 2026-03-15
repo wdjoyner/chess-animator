@@ -207,10 +207,7 @@ All colors and font sizes are in `animator_layout.py` — `ColorScheme` and `Typ
 > ffmpeg -i media/videos/animator_game/480p15/AnimatedGame.mp4 \
 >        -ss 00:00:10 -vframes 1 docs/screenshot.png
 > ```
-> Then add to this README:
-> ```markdown
-> ![Sample frame](docs/screenshot.png)
-> ```
+> For examples, see the playlist https://www.youtube.com/watch?v=hScw3EaoxNk&list=PLSwHwWPf_04RVNjMkisroM9gFSEWDFMP4
 
 ---
 
