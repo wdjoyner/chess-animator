@@ -22,7 +22,7 @@ Options:
     --scene     Manim scene class name         (default: AnimatedGame)
     --no-preview                               Don't open the video after render.
     --analyze   Run Stockfish analysis first, saving {game_id}_analysis.json,
-                then animate.  Requires chess_game_analyzer6y.py on the path.
+                then animate.  Requires chess_game_analyzer.py on the path.
     --depth N   Stockfish search depth for --analyze  (default: 20)
     --stockfish PATH  Path to Stockfish binary  (default: /usr/local/bin/stockfish)
 
