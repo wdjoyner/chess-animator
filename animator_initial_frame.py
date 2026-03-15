@@ -1,13 +1,17 @@
 """
 animator_initial_frame.py
 
-Generates the initial frame of a chess game video.
-Displays the starting position with game metadata (players, event, date, opening).
+Generates the initial frame of a chess game video and provides the
+create_header_panel() function used by animator_game.py.
+
+Displays the starting position with game metadata (players, event, date,
+opening).  All text in the header panel is width-clamped so nothing bleeds
+outside the panel boundaries at low resolution.
 
 Usage:
     manim -pql animator_initial_frame.py InitialFrame
     manim -pqh animator_initial_frame.py InitialFrame  # High quality
-    
+
     # With a specific PGN file:
     manim -pql animator_initial_frame.py InitialFrame --pgn_file path/to/game.pgn
 """
@@ -143,6 +147,8 @@ def create_header_panel(game_info: GameInfo) -> VGroup:
 
     All content lives in a single VGroup arranged with a tight uniform
     buff so it fits compactly inside the (relatively short) header panel.
+    Every text object is clamped to MAX_TEXT_WIDTH so nothing bleeds outside
+    the panel boundaries at low resolution.
 
     Layout:
         ┌─────────────────────────────────┐
@@ -157,6 +163,15 @@ def create_header_panel(game_info: GameInfo) -> VGroup:
         header_vs_size      — "vs" separator size    (default 10)
         header_info_size    — event/date/opening size (default 10)
     """
+    # Maximum text width: panel width minus left/right padding
+    MAX_TEXT_WIDTH = PANEL_WIDTH - 0.5
+
+    def _clamp(t: Text) -> Text:
+        """Scale text down if it exceeds the panel width."""
+        if t.width > MAX_TEXT_WIDTH:
+            t.set_width(MAX_TEXT_WIDTH)
+        return t
+
     panel = VGroup()
     bg = get_panel_rect(HEADER_TOP_Y, HEADER_BOTTOM_Y)
     panel.add(bg)
@@ -165,20 +180,20 @@ def create_header_panel(game_info: GameInfo) -> VGroup:
 
     # ── Player names ──────────────────────────────────────────────────────────
     white_display = format_player_display(game_info.white, game_info.white_elo)
-    content.add(Text(
+    content.add(_clamp(Text(
         f"♔  {white_display}",
         font=FONTS.heading_font,
         font_size=FONTS.header_player_size,
         color=COLORS.white_player,
-    ))
+    )))
 
     black_display = format_player_display(game_info.black, game_info.black_elo)
-    content.add(Text(
+    content.add(_clamp(Text(
         f"vs  ♚  {black_display}",
         font=FONTS.body_font,
         font_size=FONTS.header_vs_size,
         color=COLORS.text_secondary,
-    ))
+    )))
 
     # ── Event · Date on one line (saves vertical space) ──────────────────────
     event_display = game_info.get_event_display()
@@ -187,33 +202,35 @@ def create_header_panel(game_info: GameInfo) -> VGroup:
                      else "")
     event_date = "  ·  ".join(filter(None, [event_display, date_display]))
     if event_date:
-        # Truncate if combined string is too wide
-        if len(event_date) > 38:
-            event_date = event_date[:35] + "…"
-        content.add(Text(
+        content.add(_clamp(Text(
             event_date,
             font=FONTS.body_font,
             font_size=FONTS.header_info_size,
             color=COLORS.text_secondary,
-        ))
+        )))
 
     # ── Opening ───────────────────────────────────────────────────────────────
     opening_display = game_info.get_opening_display()
     if opening_display:
-        if len(opening_display) > 38:
-            opening_display = opening_display[:35] + "…"
-        content.add(Text(
+        content.add(_clamp(Text(
             opening_display,
             font=FONTS.body_font,
             font_size=FONTS.header_info_size,
             color=COLORS.text_accent,
-        ))
+        )))
 
     # ── Arrange everything with a tight uniform spacing ───────────────────────
     content.arrange(DOWN, buff=0.08)
     content.move_to([PANEL_CENTER_X, HEADER_CENTER_Y, 0])
-    panel.add(content)
 
+    # Final safety check: if the whole content block is taller than the panel,
+    # scale it down uniformly so nothing bleeds vertically either.
+    panel_height = HEADER_TOP_Y - HEADER_BOTTOM_Y - 0.2
+    if content.height > panel_height:
+        content.scale(panel_height / content.height)
+        content.move_to([PANEL_CENTER_X, HEADER_CENTER_Y, 0])
+
+    panel.add(content)
     return panel
 
 
