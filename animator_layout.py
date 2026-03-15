@@ -4,6 +4,9 @@ animator_layout.py
 Layout constants and configuration for the chess game video animator.
 Defines the 16:9 frame geometry, positioning, colors, and fonts.
 
+Color scheme: light warm background (#f0ede8) with dark text and plot lines
+for maximum readability.
+
 The layout divides the frame into two zones:
 
   ┌─────────────────────────────────────────────────────────┐
@@ -173,42 +176,42 @@ COMMENTARY_CENTER_Y = (COMMENTARY_TOP_Y + COMMENTARY_BOTTOM_Y) / 2
 
 @dataclass
 class ColorScheme:
-    """Color scheme for the video."""
-    background: str = "#1a1a2e"       # Dark blue-gray background
+    """Color scheme for the video — light background with dark text and plot lines."""
+    background: str = "#f0ede8"       # Warm off-white background
 
     # Panel colors
-    panel_bg:     str = "#16213e"     # Slightly lighter than background
-    panel_border: str = "#0f3460"     # Panel border color
+    panel_bg:     str = "#e8e4de"     # Slightly darker than background
+    panel_border: str = "#b0a898"     # Warm gray panel border
 
     # Text colors
-    text_primary:   str = "#ffffff"   # White for main text
-    text_secondary: str = "#a0a0a0"   # Gray for secondary info
-    text_accent:    str = "#e94560"   # Red accent for highlights
+    text_primary:   str = "#1a1a1a"   # Near-black for main text
+    text_secondary: str = "#555555"   # Medium gray for secondary info
+    text_accent:    str = "#b03040"   # Deep red accent for highlights
 
     # Player colors
-    white_player: str = "#f0f0f0"     # Off-white for White player
-    black_player: str = "#404040"     # Dark gray for Black player
+    white_player: str = "#2a2a2a"     # Dark for White player label
+    black_player: str = "#2a2a2a"     # Dark for Black player label
 
-    # Move classification colors
-    brilliant:  str = "#1baca6"       # Teal
-    great:      str = "#5c8bb0"       # Blue
-    best:       str = "#9eca5c"       # Green
-    excellent:  str = "#96bc4b"       # Light green
-    good:       str = "#96af8b"       # Muted green
-    book:       str = "#a88865"       # Brown
-    inaccuracy: str = "#f7c631"       # Yellow
-    mistake:    str = "#e69138"       # Orange
-    blunder:    str = "#ca3431"       # Red
-    missed_win: str = "#ff6b6b"       # Bright red
+    # Move classification colors (darkened for legibility on light bg)
+    brilliant:  str = "#0e7a76"       # Dark teal
+    great:      str = "#2e5f8a"       # Dark blue
+    best:       str = "#4a7a1e"       # Dark green
+    excellent:  str = "#3d6b10"       # Darker green
+    good:       str = "#4a6040"       # Muted dark green
+    book:       str = "#6b5030"       # Dark brown
+    inaccuracy: str = "#a07800"       # Dark amber
+    mistake:    str = "#b05010"       # Dark orange
+    blunder:    str = "#8b1a1a"       # Dark red
+    missed_win: str = "#9b2020"       # Deep red
 
-    # Metric plot line colors
-    plot_white:      str = "#e0e0e0"  # Light gray  — White's series
-    plot_black:      str = "#7090c0"  # Steel blue  — Black's series
-    plot_net_pos:    str = "#9eca5c"  # Green       — net advantage (positive)
-    plot_net_neg:    str = "#ca3431"  # Red         — net advantage (negative)
-    plot_fti:        str = "#e94560"  # Accent red  — FTI line
-    plot_zero_line:  str = "#404060"  # Dim purple  — y=0 reference line
-    plot_cursor:     str = "#ffffff"  # White       — current-move cursor
+    # Metric plot line colors (dark, readable on light background)
+    plot_white:      str = "#444444"  # Dark gray     — White's series
+    plot_black:      str = "#1a3a6a"  # Dark navy     — Black's series
+    plot_net_pos:    str = "#2e6b10"  # Dark green    — net advantage (positive)
+    plot_net_neg:    str = "#8b1a1a"  # Dark red      — net advantage (negative)
+    plot_fti:        str = "#7a1030"  # Deep crimson  — FTI line
+    plot_zero_line:  str = "#999999"  # Medium gray   — y=0 reference line
+    plot_cursor:     str = "#1a1a1a"  # Near-black    — current-move cursor
 
 
 # Default color scheme
@@ -222,9 +225,9 @@ COLORS = ColorScheme()
 @dataclass
 class Typography:
     """Font configuration."""
-    heading_font: str = "Liberation Sans"
-    body_font:    str = "Liberation Sans"
-    mono_font:    str = "Liberation Mono"
+    heading_font: str = "Courier New"
+    body_font:    str = "Courier New"
+    mono_font:    str = "Courier New"
 
     # Sizes (Manim units; ~1 unit ≈ 36 pt at default resolution)
     title_size:       int = 20
