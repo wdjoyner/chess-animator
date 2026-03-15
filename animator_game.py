@@ -2,21 +2,23 @@
 animator_game.py
 
 Animates a chess game with move-by-move analysis and commentary.
-Integrates with chess_game_analyzer6y.py for Stockfish annotations.
+Integrates with chess_game_analyzer.py for Stockfish annotations.
 
 Usage:
     # Set config path via environment variable, then run manim:
     export CHESS_ANIMATOR_CONFIG=game_animator_config.json
     manim -pql animator_game.py AnimatedGame
 
-    # Or use run_animator.py which handles config setup automatically.
+    # Or use run_animator.py which handles config setup automatically:
+    python run_animator.py sample_game --quality low
+    python run_animator.py --stockfish /usr/games/stockfish sample_game --quality low
 
     # Quick demo (no files needed):
     manim -pql animator_game.py QuickDemo
 
 Requirements:
     - manim, manim-chess, chess
-    - chess_game_analyzer6y.py (for analysis)
+    - chess_game_analyzer.py (for analysis)
     - Stockfish (if running live analysis)
 
 Changes from previous version:
@@ -25,9 +27,12 @@ Changes from previous version:
     - AnalysisData.from_json_file() correctly unpacks nested positional_eval
     - AnimatedGame reads config from CHESS_ANIMATOR_CONFIG env var (JSON file)
       instead of the broken --user_args Manim CLI approach
+    - stockfish_path now passed through config JSON so --stockfish flag works
+    - Analyzer module renamed from chess_game_analyzer6y to chess_game_analyzer
     - Animation loop accepts optional MetricPlotPanel (imported from
       animator_metrics.py when available)
     - QuickDemo updated with positional fields for self-contained testing
+    - Color scheme updated to light background with dark text and plot lines
 """
 
 import json
@@ -42,7 +47,7 @@ import chess
 import chess.pgn
 
 from animator_layout import (
-    COLORS, FONTS, FRAME_WIDTH,
+    COLORS, FONTS, FRAME_WIDTH, FRAME_HEIGHT,
     BOARD_SCALE, BOARD_CENTER_X, BOARD_CENTER_Y,
     EVAL_BAR_SCALE, EVAL_BAR_OFFSET,
     PANEL_LEFT_X, PANEL_RIGHT_X, PANEL_CENTER_X, PANEL_WIDTH,
@@ -130,7 +135,7 @@ try:
 except ImportError:
     METRICS_AVAILABLE = False
 
-# FTI weight constants (mirrors chess_game_analyzer6y.py)
+# FTI weight constants (mirrors chess_game_analyzer.py)
 THREATS_SCALE_FACTOR = 20.0
 FTI1_WEIGHTS = (0.25, 0.25, 0.25, 0.25)   # Harmonious
 FTI2_WEIGHTS = (0.60, 0.10, 0.00, 0.30)   # Tactical
@@ -208,7 +213,7 @@ class MoveData:
         Build a MoveData from a JSON-decoded dict.
 
         Handles two JSON shapes:
-        1. Produced by chess_game_analyzer6y directly (nested positional_eval
+        1. Produced by chess_game_analyzer directly (nested positional_eval
            sub-dict with raw field names like space_white_mg).
         2. Produced by AnalysisData.save_to_json() via asdict() on MoveData
            (flat fields: space_white, mobility_white, etc. at top level).
@@ -288,7 +293,7 @@ class AnalysisData:
     @classmethod
     def from_json_file(cls, json_path: Path) -> "AnalysisData":
         """
-        Load analysis from a JSON file produced by chess_game_analyzer6y.py.
+        Load analysis from a JSON file produced by chess_game_analyzer.py.
 
         The JSON contains a 'moves' list where each element has a nested
         'positional_eval' dict — MoveData.from_dict() handles that unpacking.
@@ -327,13 +332,13 @@ class AnalysisData:
                       stockfish_path: str = "/usr/local/bin/stockfish",
                       depth: int = 20) -> "AnalysisData":
         """
-        Run live analysis using chess_game_analyzer6y.py.
+        Run live analysis using chess_game_analyzer.py.
         Prefer pre-computed JSON (from_json_file) for iteration speed.
         """
         try:
-            from chess_game_analyzer6y import EnhancedGameAnalyzer
+            from chess_game_analyzer import EnhancedGameAnalyzer
         except ImportError:
-            raise ImportError("chess_game_analyzer6y.py must be in the Python path")
+            raise ImportError("chess_game_analyzer.py must be in the Python path")
 
         with EnhancedGameAnalyzer(stockfish_path, depth) as analyzer:
             result = analyzer.analyze_game(str(pgn_path))
@@ -511,7 +516,7 @@ class MoveListPanel:
                         i += 2
                         continue
                     else:
-                        line += f" {black_text}"
+                        line = line.ljust(12) + black_text
                         if black_move.classification in ("blunder", "mistake", "inaccuracy"):
                             if move.classification not in ("blunder", "mistake"):
                                 color = get_classification_color(black_move.classification)
@@ -551,8 +556,8 @@ class MoveListPanel:
 
         group = VGroup()
         for i, (line, color) in enumerate(zip(visible_lines, visible_colors)):
-            if len(line) > 25:
-                line = line[:22] + "..."
+            if len(line) > 32:
+                line = line[:29] + "..."
             t = Text(
                 line,
                 font=FONTS.mono_font,
@@ -700,7 +705,7 @@ def _load_animator_config() -> Dict[str, str]:
     CHESS_ANIMATOR_CONFIG environment variable.
 
     Returns a dict with optional keys:
-        pgn_path, analysis_path, comments_path
+        pgn_path, analysis_path, comments_path, stockfish_path
     """
     config_path = os.environ.get("CHESS_ANIMATOR_CONFIG", "")
     if config_path and Path(config_path).exists():
@@ -784,13 +789,164 @@ class AnimatedGame(Scene):
         else:
             print("No commentary file found — using engine-only mode.")
 
+    def _make_title_card(self, info: "GameInfo") -> VGroup:
+        """
+        Build the opening title card as a VGroup of Text objects.
+
+        Displays: event/site, date, White vs Black with Elos, opening name,
+        result, and an optional custom intro line from
+        self.custom_comments["intro"].
+
+        Every text item is clamped to MAX_WIDTH so nothing bleeds horizontally.
+        arrange(DOWN, buff=0.40) provides enough vertical breathing room to
+        prevent lines from bleeding into each other at low resolution.
+        """
+        MAX_WIDTH = FRAME_WIDTH - 2.0
+
+        def _t(text, font_size, color, bold=False):
+            t = Text(text, font=FONTS.heading_font,
+                     font_size=font_size, color=color,
+                     weight=BOLD if bold else NORMAL)
+            if t.width > MAX_WIDTH:
+                t.set_width(MAX_WIDTH)
+            return t
+
+        gi    = info
+        items = []
+
+        # ── Title line: event or "Chess Game" fallback ───────────────────────
+        event_str = gi.event if gi.event and gi.event not in ("?", "") else "Chess Game"
+        items.append(_t(event_str, 28, COLORS.text_accent, bold=True))
+
+        # ── Site · Date ───────────────────────────────────────────────────────
+        site_date_parts = [p for p in (gi.site, gi.date)
+                           if p and p not in ("?", "", "????.??.??")]
+        if site_date_parts:
+            items.append(_t("  ·  ".join(site_date_parts), 16, COLORS.text_secondary))
+
+        # ── Players ───────────────────────────────────────────────────────────
+        white_str = format_player_display(gi.white, gi.white_elo)
+        black_str = format_player_display(gi.black, gi.black_elo)
+        items.append(_t(f"{white_str}  vs  {black_str}", 22, COLORS.text_primary, bold=True))
+
+        # ── Opening ───────────────────────────────────────────────────────────
+        if gi.opening and gi.opening not in ("?", ""):
+            eco_prefix = f"{gi.eco}  " if gi.eco and gi.eco not in ("?", "") else ""
+            items.append(_t(f"{eco_prefix}{gi.opening}", 14, COLORS.text_secondary))
+
+        # ── Result ────────────────────────────────────────────────────────────
+        result_str = gi.result if gi.result and gi.result not in ("?", "*", "") else ""
+        if result_str:
+            items.append(_t(result_str, 18, COLORS.text_primary))
+
+        # ── Custom intro (from notes file [intro] key) ────────────────────────
+        if "intro" in self.custom_comments:
+            items.append(_t(self.custom_comments["intro"], 14, COLORS.text_primary))
+
+        card = VGroup(*items)
+        card.arrange(DOWN, buff=0.40, center=True)
+
+        # Safety: scale down if card is taller than the frame
+        if card.height > FRAME_HEIGHT - 1.0:
+            card.scale((FRAME_HEIGHT - 1.0) / card.height)
+
+        card.move_to(ORIGIN)
+        return card
+
+    def _make_end_card(self, analysis: "AnalysisData") -> VGroup:
+        """
+        Build the closing end card as a VGroup of Text objects.
+
+        Shows: result, accuracy statistics, move counts by classification,
+        a customizable "conclusion" comment, and a credits block listing
+        Stockfish, Manim, manim-chess, and Claude.
+
+        Every text item is clamped to MAX_WIDTH so nothing bleeds horizontally.
+        arrange(DOWN, buff=0.30) provides enough vertical breathing room to
+        prevent lines from bleeding into each other at low resolution.
+        """
+        MAX_WIDTH = FRAME_WIDTH - 2.0
+
+        def _t(text, font_size, color, bold=False):
+            t = Text(text, font=FONTS.heading_font,
+                     font_size=font_size, color=color,
+                     weight=BOLD if bold else NORMAL)
+            if t.width > MAX_WIDTH:
+                t.set_width(MAX_WIDTH)
+            return t
+
+        gi    = analysis.game_info
+        items = []
+
+        # ── Result headline ───────────────────────────────────────────────────
+        result_str = self.custom_comments.get("result", gi.result) or "*"
+        items.append(_t(result_str, 32, COLORS.text_accent, bold=True))
+
+        # ── Players ───────────────────────────────────────────────────────────
+        white_str = format_player_display(gi.white, gi.white_elo)
+        black_str = format_player_display(gi.black, gi.black_elo)
+        items.append(_t(f"{white_str}  vs  {black_str}", 18, COLORS.text_primary))
+
+        # ── Accuracy ─────────────────────────────────────────────────────────
+        items.append(_t(
+            f"Accuracy:  {gi.white} {analysis.white_accuracy:.1f}%"
+            f"   {gi.black} {analysis.black_accuracy:.1f}%",
+            14, COLORS.text_secondary,
+        ))
+
+        # ── Move classification counts (two rows) ─────────────────────────────
+        counts: Dict[str, int] = {}
+        for m in analysis.moves:
+            counts[m.classification] = counts.get(m.classification, 0) + 1
+
+        order = ["brilliant", "great", "best", "excellent",
+                 "good", "book", "inaccuracy", "mistake", "blunder"]
+        stat_parts = [f"{c.capitalize()}: {counts[c]}"
+                      for c in order if c in counts]
+        if stat_parts:
+            mid = (len(stat_parts) + 1) // 2
+            items.append(_t("  ·  ".join(stat_parts[:mid]),  12, COLORS.text_secondary))
+            items.append(_t("  ·  ".join(stat_parts[mid:]),  12, COLORS.text_secondary))
+
+        # ── Custom conclusion ─────────────────────────────────────────────────
+        if "conclusion" in self.custom_comments:
+            items.append(_t(self.custom_comments["conclusion"], 14, COLORS.text_primary))
+
+        # ── Thanks / Credits ──────────────────────────────────────────────────
+        items.append(_t("— Thanks for watching —", 16, COLORS.text_accent, bold=True))
+
+        for line in [
+            "Analysis engine: Stockfish  (stockfishchess.org)",
+            "Animation:       Manim Community  (manim.community)",
+            "Chess rendering: manim-chess",
+            "AI assistance:   Claude (Anthropic)",
+        ]:
+            items.append(_t(line, 11, COLORS.text_secondary))
+
+        card = VGroup(*items)
+        card.arrange(DOWN, buff=0.30, center=True)
+
+        # Safety: scale down if card is taller than the frame
+        if card.height > FRAME_HEIGHT - 0.8:
+            card.scale((FRAME_HEIGHT - 0.8) / card.height)
+
+        card.move_to(ORIGIN)
+        return card
+
     def construct(self):
         # ── 1. Initialise ────────────────────────────────────────────────────
         self.camera.background_color = COLORS.background
         analysis = self._load_analysis()
         self._load_custom_comments()
 
-        # ── 2. Board & eval bar ──────────────────────────────────────────────
+        # ── 2. Title card ────────────────────────────────────────────────────
+        title_card = self._make_title_card(analysis.game_info)
+        self.play(FadeIn(title_card), run_time=1.0)
+        self.wait(3)
+        self.play(FadeOut(title_card), run_time=0.8)
+        self.wait(0.3)
+
+        # ── 3. Board & eval bar ──────────────────────────────────────────────
         board = manim_chess.Board()
         board.set_board_from_FEN()
         board.scale(BOARD_SCALE)
@@ -800,26 +956,15 @@ class AnimatedGame(Scene):
         eval_bar.scale(EVAL_BAR_SCALE)
         eval_bar.next_to(board, LEFT, buff=EVAL_BAR_OFFSET)
 
-        # ── 3. Side panels ───────────────────────────────────────────────────
+        # ── 4. Side panels ───────────────────────────────────────────────────
         header_panel = create_header_panel(analysis.game_info)
         move_list    = MoveListPanel()
         commentary   = CommentaryPanel(custom_comments=self.custom_comments)
 
-        # ── 4. Optional metric panel ─────────────────────────────────────────
+        # ── 5. Optional metric panel ─────────────────────────────────────────
         metric_panel = None
         if METRICS_AVAILABLE:
             metric_panel = MetricPlotPanel(analysis.moves)
-
-        # ── 5. Intro card ────────────────────────────────────────────────────
-        if "intro" in self.custom_comments:
-            intro_text = Text(
-                self.custom_comments["intro"],
-                font=FONTS.body_font,
-                font_size=FONTS.commentary_size + 2,
-            ).set_width(FRAME_WIDTH - 4)
-            self.play(Write(intro_text))
-            self.wait(2)
-            self.play(FadeOut(intro_text))
 
         # Add all persistent objects
         objects_to_add = [board, eval_bar, header_panel,
@@ -833,17 +978,14 @@ class AnimatedGame(Scene):
             uci = move.move_uci
             from_sq, to_sq = uci[:2], uci[2:4]
 
-            # Move the piece on the board
             manim_chess.play_game(
                 scene=self,
                 board=board,
                 moves=[(from_sq, to_sq, "")]
             )
 
-            # Clamp eval to ±10 pawns for the bar
             eval_pawns = max(-4.0, min(4.0, move.eval_after / 100.0))
 
-            # Build simultaneous panel animations
             panel_anims = [
                 eval_bar.set_evaluation(eval_pawns),
                 move_list.add_move(move),
@@ -855,27 +997,18 @@ class AnimatedGame(Scene):
             self.play(*panel_anims, run_time=0.4)
             self.wait(0.2)
 
-        # ── 7. Conclusion ────────────────────────────────────────────────────
+        # ── 7. End card ──────────────────────────────────────────────────────
         self.wait(1)
 
-        final_result = self.custom_comments.get("result", analysis.game_info.result)
-        result_text = Text(
-            final_result,
-            font=FONTS.heading_font,
-            font_size=72
-        ).move_to(board)
-        dimmer = BackgroundRectangle(board, fill_opacity=0.8)
-        self.play(FadeIn(dimmer), Write(result_text))
+        # Fade out the board area, keep side panels a moment then clear all
+        game_objects = Group(board, eval_bar)
+        self.play(FadeOut(game_objects), run_time=0.8)
+        self.play(FadeOut(Group(*objects_to_add)), run_time=0.5)
 
-        if "conclusion" in self.custom_comments:
-            conc_text = (
-                Text(self.custom_comments["conclusion"], font_size=20)
-                .set_width(PANEL_WIDTH - 0.5)
-                .move_to(commentary.content_group)
-            )
-            self.play(ReplacementTransform(commentary.content_group, conc_text))
-
-        self.wait(3)
+        end_card = self._make_end_card(analysis)
+        self.play(FadeIn(end_card), run_time=1.0)
+        self.wait(5)
+        self.play(FadeOut(end_card), run_time=1.0)
 
 
 # =============================================================================
@@ -972,7 +1105,7 @@ def generate_analysis_json(pgn_path: str, output_path: str = None,
                            stockfish_path: str = "/usr/local/bin/stockfish",
                            depth: int = 20):
     """
-    Generate analysis JSON from a PGN using chess_game_analyzer6y.
+    Generate analysis JSON from a PGN using chess_game_analyzer.
 
     Run this once; then use the JSON with AnimatedGame for fast iteration.
 
