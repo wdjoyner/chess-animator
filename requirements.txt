@@ -7,7 +7,7 @@
 
 # Core animation
 manim>=0.18.0
-manim-chess>=0.1.0
+manim-chess>=0.0.38
 
 # Chess logic and PGN/engine handling
 chess>=1.10.0

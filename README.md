@@ -31,7 +31,7 @@ The 16:9 frame is divided into three zones:
 |---|---|
 | Python 3.10+ | |
 | [Manim Community](https://www.manim.community/) v0.20+ | `pip install manim` |
-| [manim-chess](https://github.com/Spijkervet/manim-chess) | Provides `Board` and `EvaluationBar` |
+| [manim-chess](https://github.com/swoyer2/manim-chess) | Provides `Board` and `EvaluationBar` |
 | [python-chess](https://python-chess.readthedocs.io/) | `pip install chess` |
 | [Stockfish](https://stockfishchess.org/download/) | Binary on your system |
 
