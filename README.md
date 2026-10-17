@@ -31,15 +31,14 @@ The 16:9 frame is divided into three zones:
 |---|---|
 | Python 3.10+ | |
 | [Manim Community](https://www.manim.community/) v0.20+ | `pip install manim` |
-| [manim-chess](https://github.com/Spijkervet/manim-chess) | Provides `Board` and `EvaluationBar` |
+| [manim-chess](https://github.com/swoyer2/manim_chess) | `pip install manim-chess` — provides `Board`, `EvaluationBar`, `play_game` |
 | [python-chess](https://python-chess.readthedocs.io/) | `pip install chess` |
 | [Stockfish](https://stockfishchess.org/download/) | Binary on your system |
 
 Install Python dependencies:
 
 ```bash
-pip install manim chess
-# install manim-chess per its own instructions
+pip install -r requirements.txt
 ```
 
 ---
@@ -53,9 +52,9 @@ pip install manim chess
 | `animator_layout.py` | All geometry constants, colors, and fonts in one place. |
 | `animator_initial_frame.py` | Initial frame scene and `GameInfo` dataclass. |
 | `animator_metrics.py` | Four-plot metrics strip (Eval, Space, Mobility, King Safety). |
-| `chess_game_analyzer.py` | Stockfish wrapper — produces per-move positional metrics. |
+| `chess_game_analyzer.py` | **CGA (Chess Game Analyzer).** Stockfish wrapper that computes per-move positional metrics; also writes the LaTeX reports published in [QARC](https://github.com/wdjoyner/qarc). |
 | `convert_script_to_comment_dict.py` | Parses a `[KEY]` commentary text file into a dict. |
-| `evaluation_bar.py` | `EvaluationBar` Mobject (part of manim-chess). |
+| `manim_chess/` | Reference copy of the upstream manim-chess source. It is **not** imported (it has no `__init__.py`); the code uses the pip-installed `manim-chess` package. |
 
 ---
 
@@ -198,7 +197,7 @@ All colors and font sizes are in `animator_layout.py` — `ColorScheme` and `Typ
 
 ---
 
-## Example Output
+## Example Videos and Screenshots
 
 > **Screenshot:** To add an illustrative image to this README, render the sample game at low quality, then extract a still from the output video using ffmpeg:
 > ```bash
@@ -237,6 +236,28 @@ AnimatedGame.construct()
             update commentary
             reveal next metrics segment
 ```
+
+---
+
+## Related Projects
+
+`chess_game_analyzer.py` (CGA) is the shared analysis engine behind two front ends:
+
+```
+                    PGN
+                     │
+                     ▼
+     chess_game_analyzer.py (CGA): Stockfish + metrics
+                     │
+         ┌───────────┴───────────┐
+         ▼                       ▼
+   chess-animator              QARC
+   (this repo)          (wdjoyner/qarc)
+   Manim MP4 video      LaTeX/PDF book-length reports
+```
+
+- **[QARC](https://github.com/wdjoyner/qarc)** (Quantitative-Analytic Reports on Chess) holds sample reports produced by CGA's LaTeX output (`python chess_game_analyzer.py games.pgn -o book.tex --book`) and the CGA manual.
+- This repository supersedes the older **[wdjoyner/chess](https://github.com/wdjoyner/chess)** repository, whose full commit history is included here.
 
 ---
 

@@ -4402,7 +4402,7 @@ def analyze_game_with_positional_metrics(
         If output_path is None: EnhancedGameAnalysisResult object
 
     EXAMPLES:
-        >>> from chess_game_analyzer5 import analyze_game_with_positional_metrics
+        >>> from chess_game_analyzer import analyze_game_with_positional_metrics
         
         # Analyze a game with matplotlib plots
         analyze_game_with_positional_metrics(
@@ -4717,7 +4717,7 @@ def print_diagnostics(stockfish_path: str = "/usr/games/stockfish"):
     Print diagnostic information about Stockfish eval parsing.
     
     Usage:
-        from chess_game_analyzer_enhanced import print_diagnostics
+        from chess_game_analyzer import print_diagnostics
         print_diagnostics("/path/to/stockfish")
     """
     print("=" * 60)
