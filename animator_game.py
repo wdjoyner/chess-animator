@@ -142,6 +142,11 @@ FTI2_WEIGHTS = (0.60, 0.10, 0.00, 0.30)   # Tactical
 FTI3_WEIGHTS = (0.70, 0.10, 0.10, 0.10)   # Strategic
 
 
+def uci_to_manim_move(uci: str) -> Tuple[str, str, str]:
+    """Split a UCI move ('e7e8q') into manim-chess's (from, to, promotion)."""
+    return uci[:2], uci[2:4], uci[4:5]
+
+
 # =============================================================================
 # FTI Computation
 # =============================================================================
@@ -976,12 +981,10 @@ class AnimatedGame(Scene):
         # ── 6. Animation loop ────────────────────────────────────────────────
         for idx, move in enumerate(analysis.moves):
             uci = move.move_uci
-            from_sq, to_sq = uci[:2], uci[2:4]
-
             manim_chess.play_game(
                 scene=self,
                 board=board,
-                moves=[(from_sq, to_sq, "")]
+                moves=[uci_to_manim_move(uci)]
             )
 
             eval_pawns = max(-4.0, min(4.0, move.eval_after / 100.0))
@@ -1083,10 +1086,8 @@ class QuickDemo(Scene):
 
         for move in demo_moves:
             uci = move.move_uci
-            from_sq, to_sq = uci[:2], uci[2:4]
-
             manim_chess.play_game(scene=self, board=board,
-                                  moves=[(from_sq, to_sq, "")])
+                                  moves=[uci_to_manim_move(uci)])
 
             eval_pawns = max(-4.0, min(4.0, move.eval_after / 100.0))
             self.play(eval_bar.set_evaluation(eval_pawns), run_time=0.3)
