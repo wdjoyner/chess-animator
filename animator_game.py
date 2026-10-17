@@ -36,6 +36,7 @@ Changes from previous version:
 """
 
 import json
+import math
 import os
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -61,18 +62,46 @@ from animator_initial_frame import GameInfo, create_header_panel
 
 
 # =============================================================================
-# Scaled Evaluation Bar  (±4 pawns fills the bar instead of ±10)
+# Evaluation display helpers
+# =============================================================================
+
+# chess_game_analyzer encodes "mate in N" as ±(MATE_SCORE_CP - 10·N) centipawns,
+# with N = 0 meaning checkmate is on the board.
+MATE_SCORE_CP = 10000
+
+
+def mate_in_moves(eval_cp: float) -> Optional[int]:
+    """Moves to mate encoded in eval_cp (0 = checkmate), or None for a normal score."""
+    if abs(eval_cp) < MATE_SCORE_CP - 1000:
+        return None
+    return round((MATE_SCORE_CP - abs(eval_cp)) / 10)
+
+
+def format_eval(eval_cp: float) -> str:
+    """Short eval label: '1.3', '-0.4', 'M3', or the result once mate is on the board."""
+    mate_n = mate_in_moves(eval_cp)
+    if mate_n is None:
+        return f'{eval_cp / 100.0:.1f}'
+    if mate_n == 0:
+        return "1-0" if eval_cp > 0 else "0-1"
+    return f"M{mate_n}"
+
+
+# =============================================================================
+# Scaled Evaluation Bar  (sigmoid fill, real eval label)
 # =============================================================================
 
 class ScaledEvaluationBar(manim_chess.EvaluationBar):
     """
-    Subclass of manim_chess.EvaluationBar with a calibrated ±4 pawn scale.
+    Subclass of manim_chess.EvaluationBar that takes centipawns, labels the
+    bar with Stockfish's actual evaluation (or M<n> for a forced mate), and
+    maps the eval to the fill with the same win-probability curve Lichess
+    uses, so the bar approaches the ends without ever pinning.
 
-    Desired behaviour:
-        eval =  0  →  white fills exactly half the bar
-        eval = +4  →  white fills the full bar
-        eval = -4  →  white fills none of the bar
-        eval = +1  →  white advances by roughly one board square
+    Behaviour:
+        eval =   0 cp  →  white fills exactly half the bar
+        eval = +100 cp →  ~59%      eval = +400 cp  →  ~81%
+        eval = +1000cp →  ~98%      forced mate for white → full bar
 
     All heights are derived at runtime from self.black_rectangle.height
     (world units, after any scale() call) so the formula stays correct
@@ -82,20 +111,19 @@ class ScaledEvaluationBar(manim_chess.EvaluationBar):
     of 3.09 filled 69% of the bar instead of the intended 50%.
     """
 
-    _MAX_PAWNS = 4.0   # ±this many pawns fills the bar
+    _SIGMOID_K = 0.00368208  # Lichess winning-chances coefficient (per cp)
     _BAR_MIN_FRAC = 0.008  # tiny floor fraction so rect never disappears
 
-    def set_evaluation(self, evaluation: float):
-        self.evaluation = evaluation
+    def set_evaluation(self, eval_cp: float):
+        """Animate the bar to eval_cp (centipawns, White's point of view)."""
+        self.evaluation = eval_cp
 
         # Use get_height()/get_width(): these always return actual world dimensions
         # after any scale() call (unlike .height/.width which store unscaled values).
         H = self.black_rectangle.get_height()   # e.g. 6.4 * 0.72 = 4.608
-        half = H / 2
-        slope = half / self._MAX_PAWNS          # world units per pawn
 
-        height_from_evaluation = slope * self.evaluation + half
-        rect_height = min(max(self._BAR_MIN_FRAC * H, height_from_evaluation), H)
+        white_frac = 1.0 / (1.0 + math.exp(-self._SIGMOID_K * eval_cp))
+        rect_height = min(max(self._BAR_MIN_FRAC * H, white_frac * H), H)
         pos = self.black_rectangle.get_bottom() + np.array([0, rect_height / 2, 0])
         W = self.black_rectangle.get_width()    # actual world width after scale()
         new_rect = (
@@ -106,8 +134,8 @@ class ScaledEvaluationBar(manim_chess.EvaluationBar):
         )
 
         text_offset = H * 0.045   # ~4.5% of bar height for text nudge
-        text_val = f'{self.evaluation:.1f}'
-        if self.evaluation > 0:
+        text_val = format_eval(eval_cp)
+        if eval_cp > 0:
             new_text = (
                 Text(text_val, font="Arial")
                 .move_to(self.black_rectangle.get_bottom() + np.array([0, text_offset, 0]))
@@ -647,7 +675,13 @@ class CommentaryPanel:
             lines.append(f"{move.classification.capitalize()}{loss_text}")
 
         eval_val = move.eval_after / 100.0
-        if abs(eval_val) > 10:
+        mate_n = mate_in_moves(move.eval_after)
+        winner = "White" if eval_val > 0 else "Black"
+        if mate_n == 0:
+            lines.append(f"Checkmate - {winner} wins")
+        elif mate_n is not None:
+            lines.append(f"{winner} mates in {mate_n}")
+        elif abs(eval_val) > 10:
             lines.append("White is winning" if eval_val > 0 else "Black is winning")
         else:
             lines.append(f"Eval: {eval_val:+.2f}")
@@ -984,10 +1018,8 @@ class AnimatedGame(Scene):
                 moves=[(from_sq, to_sq, "")]
             )
 
-            eval_pawns = max(-4.0, min(4.0, move.eval_after / 100.0))
-
             panel_anims = [
-                eval_bar.set_evaluation(eval_pawns),
+                eval_bar.set_evaluation(move.eval_after),
                 move_list.add_move(move),
                 commentary.update_commentary(move),
             ]
@@ -1088,8 +1120,7 @@ class QuickDemo(Scene):
             manim_chess.play_game(scene=self, board=board,
                                   moves=[(from_sq, to_sq, "")])
 
-            eval_pawns = max(-4.0, min(4.0, move.eval_after / 100.0))
-            self.play(eval_bar.set_evaluation(eval_pawns), run_time=0.3)
+            self.play(eval_bar.set_evaluation(move.eval_after), run_time=0.3)
             self.play(move_list.add_move(move), run_time=0.3)
             self.play(commentary.update_commentary(move), run_time=0.3)
             self.wait(0.3)

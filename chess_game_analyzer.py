@@ -1008,8 +1008,10 @@ class EnhancedGameAnalyzer:
     def _eval_to_cp(self, score: chess.engine.PovScore) -> float:
         white_score = score.white()
         if white_score.is_mate():
-            mate_in = white_score.mate()
-            return 10000 - abs(mate_in) * 10 if mate_in > 0 else -10000 + abs(mate_in) * 10
+            # On a checkmated board mate() is 0 for both colours, so the sign of
+            # mate() can't say who won; compare the score against zero instead.
+            mate_in = abs(white_score.mate())
+            return 10000 - mate_in * 10 if white_score > chess.engine.Cp(0) else -10000 + mate_in * 10
         return float(white_score.score() or 0)
 
     def _get_positional_eval(self, board: chess.Board) -> PositionalEvaluation:
