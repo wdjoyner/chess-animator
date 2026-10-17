@@ -78,7 +78,7 @@ Usage:
     result = analyze_game_with_positional_metrics(
         pgn_source=game_pgn,
         output_path=report_output,
-        stockfish_path = "/usr/local/bin/stockfish", # modify as needed
+        stockfish_path = None,                       # None = auto-detect
         include_plots=True,                          # matplotlib plots
         include_ascii_plots=False,                   # ASCII verbatim plots
         depth=22,
@@ -160,11 +160,61 @@ import chess.engine
 import io
 import os
 import re
+import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Union
 from pathlib import Path
+
+
+def find_stockfish(stockfish_path: Optional[str] = None) -> str:
+    """
+    Locate the Stockfish executable.
+
+    Resolution order:
+      1. ``stockfish_path`` if given (a full path, or a command name on PATH)
+      2. The ``STOCKFISH_PATH`` environment variable
+      3. ``stockfish`` / ``stockfish.exe`` on PATH
+      4. Any other ``stockfish*`` executable on PATH
+         (e.g. official release names like ``stockfish-ubuntu-x86-64-avx2``)
+
+    Raises:
+        FileNotFoundError: if no executable can be found.
+    """
+    explicit = stockfish_path or os.environ.get("STOCKFISH_PATH")
+    if explicit:
+        expanded = os.path.expanduser(explicit)
+        found = shutil.which(expanded)
+        if found:
+            return found
+        raise FileNotFoundError(f"Stockfish not found or not executable at {explicit}")
+
+    names = ["stockfish.exe", "stockfish"] if sys.platform == "win32" else ["stockfish"]
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    # Official release binaries keep names like stockfish-ubuntu-x86-64-avx2
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        try:
+            entries = sorted(Path(directory).glob("stockfish*"))
+        except OSError:
+            continue
+        for entry in entries:
+            if sys.platform == "win32" and entry.suffix.lower() != ".exe":
+                continue
+            if entry.is_file() and os.access(entry, os.X_OK):
+                return str(entry)
+
+    raise FileNotFoundError(
+        "Stockfish not found. Install it (https://stockfishchess.org/download/), "
+        "add it to PATH, set STOCKFISH_PATH, or pass its path explicitly."
+    )
 
 # Import plotting utilities
 try:
@@ -984,10 +1034,10 @@ class StockfishEvalParser:
 
 
 class EnhancedGameAnalyzer:
-    def __init__(self, stockfish_path: str = "/usr/local/bin/stockfish",
+    def __init__(self, stockfish_path: Optional[str] = None,
                  depth: int = 20, time_limit: float = 1.0,
                  extract_positional: bool = True):
-        self.stockfish_path = stockfish_path
+        self.stockfish_path = find_stockfish(stockfish_path)
         self.depth = depth
         self.time_limit = time_limit
         self.extract_positional = extract_positional
@@ -4369,7 +4419,7 @@ class EnhancedLaTeXReportGenerator:
 def analyze_game_with_positional_metrics(
     pgn_source: Union[str, io.StringIO],
     output_path: Optional[str] = None,
-    stockfish_path: str = "/usr/games/stockfish",
+    stockfish_path: Optional[str] = None,
     depth: int = 20,
     time_limit: float = 1.0,
     include_diagrams: bool = True,
@@ -4408,7 +4458,6 @@ def analyze_game_with_positional_metrics(
         analyze_game_with_positional_metrics(
             pgn_source="game.pgn",
             output_path="analysis.tex",
-            stockfish_path="/usr/local/bin/stockfish",
             include_plots=True
         )
         
@@ -4428,7 +4477,7 @@ def analyze_game_with_positional_metrics(
             include_ascii_plots=True
         )
 
-        >>> path_to_stockfish =  "/usr/local/bin/stockfish" ## mac OS
+        >>> path_to_stockfish = None  ## auto-detect; or an explicit path
         >>> game_pgn = "../wdj-games/culver-fortna-vs-wdj-sussex-open-2026-01-11.pgn"
         >>> report_output="../wdj-games/culver-fortna-vs-wdj-sussex-open-2026-01-11-report.tex"
         >>> result = analyze_game_with_positional_metrics(pgn_source=game_pgn,output_path=report_output,stockfish_path=path_to_stockfish,include_plots=True,include_ascii_plots=False, plot_output_dir = "../wdj-games/plots/")
@@ -4491,7 +4540,7 @@ def analyze_games_to_book(
     output_path: str,
     book_title: str = "Chess Game Collection Analysis",
     author: str = None,
-    stockfish_path: str = "/usr/games/stockfish",
+    stockfish_path: Optional[str] = None,
     depth: int = 20,
     time_limit: float = 1.0,
     include_diagrams: bool = True,
@@ -4587,20 +4636,20 @@ def analyze_games_to_book(
     return latex_content, analyses
 
 
-def get_position_metrics(fen: str, stockfish_path: str = "/usr/games/stockfish") -> PositionalEvaluation:
+def get_position_metrics(fen: str, stockfish_path: Optional[str] = None) -> PositionalEvaluation:
     """
     Get detailed positional metrics for a single position.
-    
+
     Args:
         fen: FEN string of the position
-        stockfish_path: Path to Stockfish executable
-        
+        stockfish_path: Path to Stockfish executable (None = auto-detect)
+
     Returns:
         PositionalEvaluation with all metrics
     """
     commands = f"position fen {fen}\neval\nquit\n"
     result = subprocess.run(
-        [stockfish_path],
+        [find_stockfish(stockfish_path)],
         input=commands,
         capture_output=True,
         text=True,
@@ -4610,7 +4659,7 @@ def get_position_metrics(fen: str, stockfish_path: str = "/usr/games/stockfish")
     return StockfishEvalParser.parse_eval_output(result.stdout)
 
 
-def diagnose_stockfish_eval(stockfish_path: str = "/usr/games/stockfish") -> Dict:
+def diagnose_stockfish_eval(stockfish_path: Optional[str] = None) -> Dict:
     """
     Diagnostic function to check if Stockfish eval parsing is working.
     
@@ -4622,8 +4671,6 @@ def diagnose_stockfish_eval(stockfish_path: str = "/usr/games/stockfish") -> Dic
     Returns:
         Dict with diagnostic information
     """
-    import shutil
-    
     result = {
         'stockfish_found': False,
         'stockfish_path': stockfish_path,
@@ -4637,10 +4684,13 @@ def diagnose_stockfish_eval(stockfish_path: str = "/usr/games/stockfish") -> Dic
     }
     
     # Check if stockfish exists
-    if not shutil.which(stockfish_path) and not Path(stockfish_path).exists():
-        result['error'] = f"Stockfish not found at {stockfish_path}"
+    try:
+        stockfish_path = find_stockfish(stockfish_path)
+    except FileNotFoundError as e:
+        result['error'] = str(e)
         return result
-    
+
+    result['stockfish_path'] = stockfish_path
     result['stockfish_found'] = True
     
     try:
@@ -4712,7 +4762,7 @@ def diagnose_stockfish_eval(stockfish_path: str = "/usr/games/stockfish") -> Dic
     return result
 
 
-def print_diagnostics(stockfish_path: str = "/usr/games/stockfish"):
+def print_diagnostics(stockfish_path: Optional[str] = None):
     """
     Print diagnostic information about Stockfish eval parsing.
     
@@ -5758,8 +5808,9 @@ Examples:
     parser.add_argument("pgn_file", help="Path to PGN file (can contain multiple games)")
     parser.add_argument("-o", "--output", help="Output LaTeX file")
     parser.add_argument("--json-output", help="Output raw analysis as JSON")
-    parser.add_argument("-s", "--stockfish", default="/usr/games/stockfish",
-                       help="Path to Stockfish executable")
+    parser.add_argument("-s", "--stockfish", default=None,
+                       help="Path to Stockfish executable (default: auto-detect "
+                            "via STOCKFISH_PATH or PATH)")
     parser.add_argument("-d", "--depth", type=int, default=20,
                        help="Analysis depth (default: 20)")
     parser.add_argument("-t", "--time", type=float, default=1.0,

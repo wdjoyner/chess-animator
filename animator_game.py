@@ -11,7 +11,6 @@ Usage:
 
     # Or use run_animator.py which handles config setup automatically:
     python run_animator.py sample_game --quality low
-    python run_animator.py --stockfish /usr/games/stockfish sample_game --quality low
 
     # Quick demo (no files needed):
     manim -pql animator_game.py QuickDemo
@@ -329,7 +328,7 @@ class AnalysisData:
 
     @classmethod
     def from_analyzer(cls, pgn_path: Path,
-                      stockfish_path: str = "/usr/local/bin/stockfish",
+                      stockfish_path: Optional[str] = None,
                       depth: int = 20) -> "AnalysisData":
         """
         Run live analysis using chess_game_analyzer.py.
@@ -733,7 +732,7 @@ class AnimatedGame(Scene):
         self.pgn_path      = cfg.get("pgn_path")
         self.analysis_path = cfg.get("analysis_path")
         self.comments_path = cfg.get("comments_path")
-        self.stockfish_path = cfg.get("stockfish_path", "/usr/local/bin/stockfish")
+        self.stockfish_path = cfg.get("stockfish_path")
         self.custom_comments: Dict[str, str] = {}
 
     def _load_analysis(self) -> AnalysisData:
@@ -1102,7 +1101,7 @@ class QuickDemo(Scene):
 # =============================================================================
 
 def generate_analysis_json(pgn_path: str, output_path: str = None,
-                           stockfish_path: str = "/usr/local/bin/stockfish",
+                           stockfish_path: Optional[str] = None,
                            depth: int = 20):
     """
     Generate analysis JSON from a PGN using chess_game_analyzer.

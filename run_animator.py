@@ -24,7 +24,7 @@ Options:
     --analyze   Run Stockfish analysis first, saving {game_id}_analysis.json,
                 then animate.  Requires chess_game_analyzer.py on the path.
     --depth N   Stockfish search depth for --analyze  (default: 20)
-    --stockfish PATH  Path to Stockfish binary  (default: /usr/local/bin/stockfish)
+    --stockfish PATH  Path to Stockfish binary  (default: auto-detect)
 
 Examples:
     # Fast preview render (low quality)
@@ -46,6 +46,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ QUALITY_FLAGS = {
 # ---------------------------------------------------------------------------
 
 def run_analysis(pgn_path: Path, output_path: Path,
-                 stockfish: str, depth: int) -> bool:
+                 stockfish: Optional[str], depth: int) -> bool:
     """
     Run chess_game_analyzer on pgn_path and save JSON to output_path.
     Returns True on success.
@@ -202,8 +203,9 @@ def main():
         help="Stockfish depth for --analyze (default: 20).",
     )
     parser.add_argument(
-        "--stockfish", default="/usr/local/bin/stockfish",
-        help="Path to Stockfish binary (default: /usr/local/bin/stockfish).",
+        "--stockfish", default=None,
+        help="Path to Stockfish binary (default: auto-detect via STOCKFISH_PATH "
+             "or PATH).",
     )
 
     args = parser.parse_args()

@@ -98,14 +98,14 @@ python run_animator.py sample_game --quality high --no-preview
 python run_animator.py sample_game --quality ultra --no-preview
 ```
 
-### 4. Custom Stockfish path
+### 4. Stockfish location
 
 ```bash
 python run_animator.py sample_game --analyze --depth 22 \
     --stockfish /opt/homebrew/bin/stockfish
 ```
 
-Default path is `/usr/local/bin/stockfish`. On Apple Silicon Macs installed via Homebrew the binary is typically at `/opt/homebrew/bin/stockfish`.
+By default Stockfish is found automatically: the `STOCKFISH_PATH` environment variable if set, then `stockfish` on your `PATH`, then any `stockfish*` executable on your `PATH` (so official release names like `stockfish-ubuntu-x86-64-avx2` work unrenamed). If Stockfish isn't on your `PATH`, set `STOCKFISH_PATH` or pass `--stockfish`.
 
 ### 5. Your own game
 
