@@ -151,7 +151,7 @@ NEW IN VERSION 6v:
 - New constants: THREATS_SCALE_FACTOR, V_RATIO, CONFIDENCE_THRESHOLD
 
 Author: Generated for David Joyner's chess analysis pipeline, 2026-01-27
-distribution license: either modified BSD or MIT license, user's choice.
+License: MIT (see LICENSE.txt). Copyright (c) 2026 David Joyner.
 """
 
 import chess
@@ -470,13 +470,18 @@ class PositionalEvaluation:
     
     @property
     def mobility_white(self) -> float:
-        """White's mobility (average of MG and EG)."""
-        return (self.mobility_white_mg + self.mobility_white_eg) / 2
-    
+        """White's mobility (middlegame value, like Space, King Safety and Threats).
+
+        This used to average the MG and EG values, but the EG value is never
+        computed by CGA's own metrics (it stays 0), which halved Mobility in
+        reports and plots relative to the raw data block.
+        """
+        return self.mobility_white_mg
+
     @property
     def mobility_black(self) -> float:
-        """Black's mobility."""
-        return (self.mobility_black_mg + self.mobility_black_eg) / 2
+        """Black's mobility (middlegame value)."""
+        return self.mobility_black_mg
     
     @property
     def mobility_advantage(self) -> float:
@@ -996,6 +1001,13 @@ class EnhancedGameAnalyzer:
 
     def __enter__(self):
         """Protocol to support 'with' statement."""
+        if not os.path.exists(self.stockfish_path):
+            # Fall back to a Stockfish found on the PATH (e.g. /usr/games/stockfish
+            # on Debian/Ubuntu, /opt/homebrew/bin/stockfish on Apple Silicon Macs)
+            import shutil
+            found = shutil.which("stockfish") or shutil.which("/usr/games/stockfish")
+            if found:
+                self.stockfish_path = found
         self.engine = chess.engine.SimpleEngine.popen_uci(self.stockfish_path)
         self.engine_version = self.engine.id.get('name', 'Stockfish')
         return self
@@ -1139,7 +1151,8 @@ class EnhancedGameAnalyzer:
                 alternative_moves = []
                 for alt_info in info_before_list[1:]:  # Skip the best move (index 0)
                     alt_move = alt_info.get('pv', [None])[0]
-                    if alt_move and alt_move in board.legal_moves:
+                    # Skip the move actually played: it is not an "alternative"
+                    if alt_move and alt_move in board.legal_moves and alt_move != node.move:
                         alt_eval = self._eval_to_cp(alt_info['score'])
                         eval_diff = abs(best_eval - alt_eval)
                         if eval_diff <= PLAYABLE_THRESHOLD:
@@ -1578,7 +1591,7 @@ class EnhancedLaTeXReportGenerator:
         lines.append(f"% Result: {analysis.result}")
         lines.append("%")
         lines.append("% Format: ply, SAN, eval_cp, space_w, space_b, mob_w, mob_b, ks_w, ks_b, threats_w, threats_b")
-        lines.append("% Units: eval in centipawns (from White's perspective), others in Stockfish classical eval units")
+        lines.append("% Units: eval in centipawns (from White's perspective), others in CGA metric units (see the CGA manual)")
         lines.append("%")
         lines.append("% GAME_DATA_START")
         
@@ -1852,7 +1865,8 @@ class EnhancedLaTeXReportGenerator:
                     # Build list of moves to consider: best move + playable alternatives
                     moves_to_consider = [esc(move.best_move_san)]
                     for alt_san, alt_eval in move.alternative_moves:
-                        if alt_san != move.best_move_san:  # Don't duplicate best move
+                        # Don't duplicate the best move or suggest the move actually played
+                        if alt_san != move.best_move_san and alt_san != move.move_san:
                             moves_to_consider.append(esc(alt_san))
                     
                     if len(moves_to_consider) == 1:
@@ -3295,7 +3309,8 @@ class EnhancedLaTeXReportGenerator:
                     # Build list of moves to consider: best move + playable alternatives
                     moves_to_consider = [esc(move.best_move_san)]
                     for alt_san, alt_eval in move.alternative_moves:
-                        if alt_san != move.best_move_san:  # Don't duplicate best move
+                        # Don't duplicate the best move or suggest the move actually played
+                        if alt_san != move.best_move_san and alt_san != move.move_san:
                             moves_to_consider.append(esc(alt_san))
                     
                     if len(moves_to_consider) == 1:
@@ -4840,7 +4855,8 @@ def parse_raw_positional_data(tex_filepath: str, game_num: int = None) -> List[D
     return data
 
 
-def compute_fireteam_index(data: List[Dict], threats_divisor: float = 10.0) -> List[Dict]:
+def compute_fireteam_index(data: List[Dict], threats_divisor: float = THREATS_SCALE_FACTOR,
+                           weights: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)) -> List[Dict]:
     """
     Compute the Fireteam Index for each position from raw positional data.
     
@@ -4851,11 +4867,17 @@ def compute_fireteam_index(data: List[Dict], threats_divisor: float = 10.0) -> L
     - King safety advantage (defensive solidity)
     - Threats advantage (active pressure, downweighted)
     
-    Formula: FT = ΔSpace + ΔMobility + ΔKingSafety + ΔThreats/divisor
-    
+    Formula: FT = w_S*ΔSpace + w_M*ΔMobility + w_K*ΔKingSafety + w_T*ΔThreats/divisor
+
+    With weights=FTI1_WEIGHTS (or any FTIn_WEIGHTS) this matches the FTI used in
+    the reports and the predict_outcome_* functions. The default unit weights
+    give 4 x FTI1.
+
     Args:
         data: List of dicts from parse_raw_positional_data()
-        threats_divisor: Divisor for threats term (default 10.0)
+        threats_divisor: Divisor for threats term (default THREATS_SCALE_FACTOR = 20,
+                         the same scaling the reports use)
+        weights: (w_S, w_M, w_K, w_T), default (1, 1, 1, 1)
     
     Returns:
         List of dicts with keys:
@@ -4880,8 +4902,9 @@ def compute_fireteam_index(data: List[Dict], threats_divisor: float = 10.0) -> L
         delta_ks = row['ks_w'] - row['ks_b']
         delta_threats = (row['threats_w'] - row['threats_b']) / threats_divisor
         
-        ft_white = delta_space + delta_mob + delta_ks + delta_threats
-        
+        w_s, w_m, w_k, w_t = weights
+        ft_white = w_s * delta_space + w_m * delta_mob + w_k * delta_ks + w_t * delta_threats
+
         result.append({
             'ply': row['ply'],
             'san': row['san'],
@@ -4973,7 +4996,7 @@ def predict_outcome_per_ply(
         player_name: Optional name for display (e.g., "Berliner", "Caruana")
         cutoff_ply: Ignore plies <= this value (opening phase)
         streak_length: Number of consecutive plies required (default 10 = 5 full moves)
-        epsilon: Margin threshold; FT must be > epsilon (default 0.25)
+        epsilon: Margin threshold; FT must be > epsilon (default FTI_EPSILON = 0.2)
         weights: Tuple (w_space, w_mobility, w_king_safety, w_threats)
     
     Returns:
@@ -5727,6 +5750,25 @@ def compute_fireteam_index_for_analysis(
 # COMMAND LINE INTERFACE
 # =============================================================================
 
+def _relativize_graphics(latex: str, plot_dir: str, tex_path: str) -> str:
+    """
+    Make \\includegraphics paths relative to the .tex file's own folder.
+
+    Plot paths are generated relative to the current working directory
+    (e.g. 'reports/plot_eval.pdf' for '-o reports/game.tex'), but pdflatex is
+    normally run inside the folder holding the .tex file, where that path
+    doesn't exist. Rewrite the plot-folder prefix accordingly.
+    """
+    tex_dir = os.path.dirname(os.path.abspath(tex_path))
+    rel = os.path.relpath(os.path.abspath(plot_dir), tex_dir)
+    old_prefix = os.path.join(plot_dir, "")
+    new_prefix = os.path.join(rel, "")
+    if old_prefix == new_prefix:
+        return latex
+    pattern = re.compile(r"(\\includegraphics(?:\[[^\]]*\])?\{)" + re.escape(old_prefix))
+    return pattern.sub(lambda m: m.group(1) + new_prefix, latex)
+
+
 def main():
     import argparse
     
@@ -5783,7 +5825,9 @@ Examples:
     
     # Fireteam Index prediction options (book mode)
     parser.add_argument("--prediction-winner", action="store_true", default=True,
-                       help="(Book mode) Track winner in decisive games (default: True)")
+                       help="(Book mode) Track the winner of each decisive game when "
+                            "--prediction-name doesn't match. Always on; the flag is kept "
+                            "for backward compatibility.")
     parser.add_argument("--no-prediction", action="store_true",
                        help="Disable Fireteam Index prediction section entirely")
     parser.add_argument("--prediction-name", default=None,
@@ -5800,7 +5844,12 @@ Examples:
     args = parser.parse_args()
     
     plot_dir = args.plot_dir or (os.path.dirname(args.output) if args.output else ".") or "."
-    
+    # Create any output folders that don't exist yet
+    os.makedirs(plot_dir, exist_ok=True)
+    for out_path in (args.output, args.json_output):
+        if out_path and os.path.dirname(out_path):
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
     if args.book:
         # Multi-game book mode
         with EnhancedGameAnalyzer(args.stockfish, args.depth, args.time) as analyzer:
@@ -5834,6 +5883,7 @@ Examples:
                 verbose=not args.quiet
             )
             
+            latex_content = _relativize_graphics(latex_content, plot_dir, args.output)
             with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(latex_content)
             
@@ -5894,6 +5944,7 @@ Examples:
                 plot_output_dir=plot_dir
             )
             
+            latex_content = _relativize_graphics(latex_content, plot_dir, args.output)
             with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(latex_content)
             
@@ -5924,10 +5975,11 @@ Examples:
             # Print summary to stdout
             print(f"\n{analysis.white} vs {analysis.black}")
             print(f"Result: {analysis.result}")
+            space = (analysis.positional_summary or {}).get('space', {})
             print(f"\nWhite: {analysis.white_stats['accuracy']:.1f}% accuracy, "
-                  f"avg space {analysis.white_stats.get('avg_space', 0):.2f}")
+                  f"avg space {space.get('white', {}).get('avg', 0.0):.2f}")
             print(f"Black: {analysis.black_stats['accuracy']:.1f}% accuracy, "
-                  f"avg space {analysis.black_stats.get('avg_space', 0):.2f}")
+                  f"avg space {space.get('black', {}).get('avg', 0.0):.2f}")
 
 
 if __name__ == "__main__":

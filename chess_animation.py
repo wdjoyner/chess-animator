@@ -51,7 +51,7 @@ Dependencies:
     - imageio (optional, for MP4 output)
 
 Author: Generated for David Joyner's chess analysis pipeline
-License: Modified BSD or MIT (user's choice)
+License: MIT (see LICENSE.txt). Copyright (c) 2026 David Joyner.
 """
 
 import chess

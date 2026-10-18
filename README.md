@@ -265,7 +265,7 @@ AnimatedGame.construct()
 
 ## License
 
-MIT License. See `LICENSE` for details.
+MIT License. See `LICENSE.txt` for details.
 
 ---
 
