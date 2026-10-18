@@ -158,6 +158,7 @@ import chess
 import chess.pgn
 import chess.engine
 import io
+import math
 import os
 import re
 import subprocess
@@ -540,6 +541,10 @@ class EnhancedMoveAnalysis:
     # Alternative moves: list of (san, eval_cp) tuples for playable alternatives
     # Only includes moves within PLAYABLE_THRESHOLD of the best move
     alternative_moves: List[Tuple[str, float]] = field(default_factory=list)
+
+    # Engine candidate lines before this move: (uci, eval_cp from White's view),
+    # including the played move if the engine listed it (used by the move-choice test)
+    candidate_moves: List[Tuple[str, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -1158,7 +1163,15 @@ class EnhancedGameAnalyzer:
                         if eval_diff <= PLAYABLE_THRESHOLD:
                             alt_san = board.san(alt_move)
                             alternative_moves.append((alt_san, alt_eval))
-                
+
+                # All engine candidate lines (UCI, eval from White's view), including
+                # the played move if Stockfish listed it. Used by the move-choice test.
+                candidate_moves = []
+                for cand_info in info_before_list:
+                    cand_move = cand_info.get('pv', [None])[0]
+                    if cand_move and 'score' in cand_info:
+                        candidate_moves.append((cand_move.uci(), self._eval_to_cp(cand_info['score'])))
+
                 # B. Execute the move
                 move = node.move
                 board.push(move)
@@ -1218,7 +1231,7 @@ class EnhancedGameAnalyzer:
                     best_eval=best_eval, eval_loss=eval_loss, classification=classification,
                     is_capture=is_capture, is_check=board.is_check(),
                     material_balance=current_material, fen_after=board.fen(),
-                    pv_line=pv_san, positional_eval=pos_eval,
+                    pv_line=pv_san, positional_eval=pos_eval, candidate_moves=candidate_moves,
                     alternative_moves=alternative_moves
                 )
                 moves_analysis.append(move_analysis)
@@ -3018,64 +3031,13 @@ class EnhancedLaTeXReportGenerator:
                 
                 lines.append(r"")
                 
-                # Compute optimal weights via linear regression
-                if 'regression_data' in prediction_stats and len(prediction_stats['regression_data']) >= 3:
-                    optimal_result = compute_optimal_fti_weights(prediction_stats['regression_data'])
-                    if optimal_result is not None:
-                        opt_weights, r_squared = optimal_result
-                        lines.extend([
-                            r"\subsection{Empirically Optimal Weights}",
-                            r"",
-                            r"Using linear regression on the per-ply positional data from all games, "
-                            r"the following weights best predict game outcomes (win=1, draw=0.5, loss=0):",
-                            r"",
-                            r"\begin{equation}",
-                            rf"\text{{FTI}}_{{opt}} = {opt_weights[0]:.2f} \Delta S + {opt_weights[1]:.2f} \Delta M + {opt_weights[2]:.2f} \Delta K + {opt_weights[3]:.2f} \Delta T'",
-                            r"\end{equation}",
-                            r"",
-                            rf"Weights: $w_S = {opt_weights[0]:.3f}$, $w_M = {opt_weights[1]:.3f}$, "
-                            rf"$w_K = {opt_weights[2]:.3f}$, $w_T = {opt_weights[3]:.3f}$ "
-                            rf"($R^2 = {r_squared:.3f}$)",
-                            r"",
-                        ])
-                        
-                        # Evaluate accuracy with optimal weights
-                        opt_accuracy = evaluate_optimal_weights_accuracy(
-                            prediction_stats['regression_data'],
-                            opt_weights
-                        )
-                        
-                        if opt_accuracy['total'] > 0:
-                            n_opt = opt_accuracy['total']
-                            opt_pp_acc = 100 * opt_accuracy['per_ply_correct'] / n_opt
-                            opt_w_acc = 100 * opt_accuracy['windowed_correct'] / n_opt
-                            opt_bal_acc = 100 * opt_accuracy['balance_correct'] / n_opt
-                            
-                            lines.extend([
-                                r"\paragraph{Prediction Accuracy with Optimal Weights}\ \\",
-                                r"",
-                                r"\begin{tabular}{lrr}",
-                                r"\toprule",
-                                r"\textbf{Algorithm} & \textbf{Correct} & \textbf{Accuracy} \\",
-                                r"\midrule",
-                                rf"Per-ply & {opt_accuracy['per_ply_correct']}/{n_opt} & {opt_pp_acc:.1f}\% \\",
-                                rf"Windowed & {opt_accuracy['windowed_correct']}/{n_opt} & {opt_w_acc:.1f}\% \\",
-                                rf"Balance & {opt_accuracy['balance_correct']}/{n_opt} & {opt_bal_acc:.1f}\% \\",
-                                r"\bottomrule",
-                                r"\end{tabular}",
-                                r"",
-                            ])
-                        
-                        # Compare with predefined signatures
-                        lines.append(r"For comparison, the predefined signatures are:")
-                        lines.append(r"\begin{itemize}")
-                        lines.append(rf"\item FTI1 (Harmonious): $(0.25, 0.25, 0.25, 0.25)$")
-                        lines.append(rf"\item FTI2 (Tactical): $(0.60, 0.10, 0.00, 0.30)$")
-                        lines.append(rf"\item FTI3 (Strategic): $(0.70, 0.10, 0.10, 0.10)$")
-                        lines.append(rf"\item FTI4 (Dynamic): $(0.20, 0.60, 0.00, 0.20)$")
-                        lines.append(rf"\item FTI5 (Solid): $(0.30, 0.20, 0.50, 0.00)$")
-                        lines.append(r"\end{itemize}")
-                        lines.append(r"")
+                # Held-out tests (replaces the old "Empirically Optimal Weights" section,
+                # whose fitted weights and R^2 values were not meaningful)
+                lines.extend(heldout_tests_latex(
+                    analyses,
+                    prediction_stats.get('regression_data', []),
+                    tracked_name=prediction_name if (prediction_name and name_matched_any) else None,
+                ))
             
             lines.extend([
                 r"",
@@ -3103,7 +3065,9 @@ class EnhancedLaTeXReportGenerator:
                     r"\item \textbf{Per-ply}: Predicts WIN if FTI $> \epsilon$ for 10 consecutive plies (raw values)",
                     r"\item \textbf{Windowed}: Same logic but applied to a 10-ply rolling average",
                     r"\item \textbf{Balance}: Uses normalized balance $B_n$ (plies ahead $-$ plies behind) "
-                    r"and volatility $V$ (sign changes). Predicts DRAW if $|B_n| < 0.2$ or $V \ge 10$",
+                    r"and volatility $V$ (sign changes), combined as confidence "
+                    r"$C = |B_n|\cdot\max(0, 1 - V/V_{\rm thr})$ with $V_{\rm thr} = 0.2\times$(plies). "
+                    r"Predicts DRAW if $C < 0.15$",
                     r"\end{itemize}",
                     r"",
                     r"The Balance algorithm explicitly models draws by detecting games where neither side "
@@ -3639,7 +3603,10 @@ class EnhancedLaTeXReportGenerator:
     
                 prediction_stats['regression_data'].append({
                     'outcome': 0.5, # The draw value
-                    'deltas': deltas
+                    'deltas': deltas,
+                    # Stockfish eval per ply (White's view), for the held-out baseline
+                    'evals': [(row['ply'], row['eval_cp']) for row in data
+                              if row.get('eval_cp') is not None],
                 })
             # Analyze from both perspectives for draws
             lines.extend([
@@ -4334,9 +4301,14 @@ class EnhancedLaTeXReportGenerator:
                     deltas.append((ply, dS, dM, dK, dT))
                 
                 if deltas:
+                    sign = -1 if player_color.upper() == "B" else 1
                     prediction_stats['regression_data'].append({
                         'outcome': outcome,
-                        'deltas': deltas
+                        'deltas': deltas,
+                        # Stockfish eval per ply from the tracked player's view,
+                        # for the held-out baseline
+                        'evals': [(row['ply'], sign * row['eval_cp']) for row in data
+                                  if row.get('eval_cp') is not None],
                     })
         
         lines.extend([
@@ -5701,8 +5673,418 @@ def evaluate_optimal_weights_accuracy(
            (bal_prediction == "DRAW" and actual_draw) or \
            (bal_prediction == "LOSS" and actual_loss):
             results['balance_correct'] += 1
-    
+
     return results
+
+
+# =============================================================================
+# HELD-OUT TESTS OF THE FIRETEAM INDEX
+# =============================================================================
+#
+# These replace the old "empirically optimal weights" section of book reports.
+# That section fitted weights to every game at once (with no intercept, then
+# clipped and rescaled them), so its weights and R^2 values were not
+# meaningful. Here every prediction is made for a game the model was NOT
+# fitted on, and is compared with simple baselines.
+
+def _solve_linear(A, b):
+    """Solve the small dense system A x = b (Gaussian elimination, partial pivoting)."""
+    n = len(b)
+    M = [[float(v) for v in A[i]] + [float(b[i])] for i in range(n)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(M[r][c]))
+        if abs(M[p][c]) < 1e-12:
+            return None
+        M[c], M[p] = M[p], M[c]
+        for r in range(c + 1, n):
+            f = M[r][c] / M[c][c]
+            for j in range(c, n + 1):
+                M[r][j] -= f * M[c][j]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = (M[i][n] - sum(M[i][j] * x[j] for j in range(i + 1, n))) / M[i][i]
+    return x
+
+
+def _nearest_outcome(score: float) -> float:
+    """Round a predicted score to the nearest result: 0 (loss), 0.5 (draw), 1 (win)."""
+    return min((0.0, 0.5, 1.0), key=lambda o: abs(o - score))
+
+
+def _eval_streak_prediction(evals, cutoff_ply: int = 16, streak_length: int = 10,
+                            margin_cp: float = 100.0) -> float:
+    """
+    The per-ply streak rule applied to Stockfish's evaluation instead of the FTI.
+    evals: list of (ply, eval_cp) from the tracked player's point of view.
+    Returns 1.0 (win) if the player stays more than margin_cp ahead for
+    streak_length consecutive plies after cutoff_ply, 0.0 (loss) for the
+    mirror case, else 0.5 (draw).
+    """
+    up = down = best_up = best_down = 0
+    for ply, ev in evals:
+        if ply <= cutoff_ply:
+            continue
+        up = up + 1 if ev > margin_cp else 0
+        down = down + 1 if ev < -margin_cp else 0
+        best_up, best_down = max(best_up, up), max(best_down, down)
+    if best_up >= streak_length and best_up >= best_down:
+        return 1.0
+    if best_down >= streak_length:
+        return 0.0
+    return 0.5
+
+
+def heldout_outcome_test(regression_data: List[Dict], cutoff_ply: int = 16) -> Optional[Dict]:
+    """
+    Leave-one-game-out test of fitted FTI weights for predicting results.
+
+    For each game, weights (with an intercept) are fitted by least squares on
+    the OTHER games' mean per-ply deltas (dS, dM, dK, dT'), then used to predict
+    the held-out game's result, rounded to win/draw/loss. Two baselines are
+    scored the same way:
+      * always predict the most common result among the other games;
+      * the per-ply streak rule applied to Stockfish's evaluation.
+
+    Returns a dict of counts, or None if there are fewer than 3 usable games.
+    """
+    rows = []
+    for g in regression_data:
+        ds = [d[1:] for d in g['deltas'] if d[0] > cutoff_ply]
+        if not ds:
+            continue
+        n = len(ds)
+        x = [1.0] + [sum(d[i] for d in ds) / n for i in range(4)]
+        rows.append((x, g['outcome'], g.get('evals', [])))
+    N = len(rows)
+    if N < 3:
+        return None
+    res = {
+        'games': N,
+        'all_same': len({r[1] for r in rows}) == 1,
+        'outcome_counts': {o: sum(1 for r in rows if r[1] == o) for o in (1.0, 0.5, 0.0)},
+        'fti_correct': 0, 'majority_correct': 0, 'eval_correct': 0,
+        'eval_available': all(r[2] for r in rows),
+    }
+    for k in range(N):
+        train = [rows[i] for i in range(N) if i != k]
+        # Normal equations, with a tiny ridge term (not on the intercept) for stability
+        A = [[sum(t[0][i] * t[0][j] for t in train) + (1e-6 if (i == j and i > 0) else 0.0)
+              for j in range(5)] for i in range(5)]
+        b = [sum(t[0][i] * t[1] for t in train) for i in range(5)]
+        w = _solve_linear(A, b)
+        pred = _nearest_outcome(sum(wi * xi for wi, xi in zip(w, rows[k][0]))) if w else 0.5
+        res['fti_correct'] += int(pred == rows[k][1])
+        counts = {}
+        for t in train:
+            counts[t[1]] = counts.get(t[1], 0) + 1
+        majority = max(counts, key=lambda o: (counts[o], o))
+        res['majority_correct'] += int(majority == rows[k][1])
+        if rows[k][2]:
+            res['eval_correct'] += int(_eval_streak_prediction(rows[k][2], cutoff_ply) == rows[k][1])
+    return res
+
+
+# --- Move-choice ("revealed preference") test -------------------------------
+
+CHOICE_FEATURES = ("Eval", "Space", "Mobility", "King Safety", "Threats")
+
+
+def _choice_features(board: chess.Board, move: chess.Move, best_cp: float, cand_cp: float) -> List[float]:
+    """Features of one candidate move, from the mover's point of view: its eval
+    relative to the best candidate (pawns), then own-minus-opponent Space,
+    Mobility, King Safety and Threats/20 in the position it leads to."""
+    me = board.turn
+    board.push(move)
+    a = EnhancedGameAnalyzer   # the metric helpers don't use instance state
+    tw, tb = compute_threats(board)
+    threats = (tw - tb) if me == chess.WHITE else (tb - tw)
+    f = [
+        (cand_cp - best_cp) / 100.0,
+        a._calculate_space(None, board, me) - a._calculate_space(None, board, not me),
+        a._calculate_mobility(None, board, me) - a._calculate_mobility(None, board, not me),
+        a._calculate_king_safety(None, board, me) - a._calculate_king_safety(None, board, not me),
+        threats / THREATS_SCALE_FACTOR,
+    ]
+    board.pop()
+    return f
+
+
+def build_move_choice_decisions(analyses: List['EnhancedGameAnalysisResult'],
+                                cutoff_ply: int = 16,
+                                playable_cp: float = PLAYABLE_THRESHOLD) -> List[Dict]:
+    """
+    One "decision" per position (after cutoff_ply) where the engine listed at
+    least two moves within playable_cp of its best and the player chose one of
+    them. Positions with only one playable move, or where the player chose a
+    worse move, carry no information about style and are skipped.
+    """
+    decisions = []
+    for gi, an in enumerate(analyses):
+        board = chess.Board()
+        for m in an.moves:
+            try:
+                move = chess.Move.from_uci(m.move_uci)
+            except ValueError:
+                break
+            if m.ply > cutoff_ply and getattr(m, 'candidate_moves', None):
+                sign = 1 if board.turn == chess.WHITE else -1
+                cands = {}
+                for uci, ev in m.candidate_moves:
+                    cands.setdefault(uci, sign * ev)
+                best = max(cands.values())
+                cands = {u: v for u, v in cands.items() if best - v <= playable_cp}
+                if m.move_uci in cands and len(cands) >= 2:
+                    ucis = list(cands)
+                    decisions.append({
+                        'game': gi,
+                        'player': an.white if board.turn == chess.WHITE else an.black,
+                        'X': [_choice_features(board, chess.Move.from_uci(u), best, cands[u]) for u in ucis],
+                        'y': ucis.index(m.move_uci),
+                    })
+            if move not in board.legal_moves:
+                break
+            board.push(move)
+    return decisions
+
+
+def _standardize_choices(decisions: List[Dict]) -> None:
+    """Center each feature within its position and divide by the pooled spread,
+    so weights are comparable (log-odds per standard deviation)."""
+    nf = len(CHOICE_FEATURES)
+    sq, cnt = [0.0] * nf, 0
+    for d in decisions:
+        k = len(d['X'])
+        means = [sum(row[i] for row in d['X']) / k for i in range(nf)]
+        d['Z'] = [[row[i] - means[i] for i in range(nf)] for row in d['X']]
+        for row in d['Z']:
+            for i in range(nf):
+                sq[i] += row[i] ** 2
+        cnt += k
+    sd = [math.sqrt(s / cnt) if cnt and s > 0 else 1.0 for s in sq]
+    for d in decisions:
+        d['Z'] = [[row[i] / sd[i] for i in range(nf)] for row in d['Z']]
+
+
+def _choice_probs(w, Z, cols):
+    s = [sum(w[j] * row[c] for j, c in enumerate(cols)) for row in Z]
+    mx = max(s)
+    e = [math.exp(v - mx) for v in s]
+    tot = sum(e)
+    return [v / tot for v in e]
+
+
+def _fit_choice_model(decisions: List[Dict], cols, lam: float = 1.0, iters: int = 30) -> List[float]:
+    """Conditional logit, P(choose j) proportional to exp(w . z_j), fitted by
+    Newton's method with a small L2 penalty."""
+    p = len(cols)
+    w = [0.0] * p
+    for _ in range(iters):
+        g = [-2 * lam * wi for wi in w]
+        H = [[2 * lam if i == j else 0.0 for j in range(p)] for i in range(p)]
+        for d in decisions:
+            Z = [[row[c] for c in cols] for row in d['Z']]
+            pr = _choice_probs(w, d['Z'], cols)
+            mean = [sum(pr[j] * Z[j][i] for j in range(len(Z))) for i in range(p)]
+            for i in range(p):
+                g[i] += Z[d['y']][i] - mean[i]
+                for k in range(p):
+                    H[i][k] += sum(pr[j] * Z[j][i] * Z[j][k] for j in range(len(Z))) - mean[i] * mean[k]
+        step = _solve_linear(H, g)
+        if step is None:
+            break
+        w = [wi + si for wi, si in zip(w, step)]
+        if max(abs(si) for si in step) < 1e-7:
+            break
+    return w
+
+
+def _score_choice_model(w, decisions: List[Dict], cols) -> Tuple[int, float]:
+    """(number of decisions where the most likely move was the one played, total log-likelihood)"""
+    hits, ll = 0, 0.0
+    for d in decisions:
+        pr = _choice_probs(w, d['Z'], cols)
+        hits += int(max(range(len(pr)), key=lambda j: pr[j]) == d['y'])
+        ll += math.log(max(pr[d['y']], 1e-300))
+    return hits, ll
+
+
+def heldout_move_choice_test(analyses: List['EnhancedGameAnalysisResult'],
+                             players: Optional[List[str]] = None,
+                             min_games: int = 3,
+                             merge_names: Optional[Dict[str, str]] = None) -> Optional[Dict]:
+    """
+    Leave-one-game-out test of whether Space, Mobility, King Safety and Threats
+    reveal a player's style, i.e. help predict which of several near-equal
+    moves the player chooses.
+
+    For each player (default: up to four players with at least min_games
+    games in the collection), three models are scored on held-out games:
+      * eval only:            the engine evaluation of each candidate;
+      * eval + four metrics:  adds the four positional metrics;
+      * other players' model: eval + metrics, fitted on everyone else's moves.
+    If the metrics captured a personal style, "eval + four metrics" would beat
+    "eval only", and the player's own model would beat the other players' model.
+
+    merge_names maps alternative spellings of a name (as they appear in the
+    PGN headers) to one player label.
+    """
+    decisions = build_move_choice_decisions(analyses)
+    if not decisions:
+        return None
+    if merge_names:
+        for d in decisions:
+            d['player'] = merge_names.get(d['player'], d['player'])
+    _standardize_choices(decisions)
+    by_player = {}
+    for d in decisions:
+        by_player.setdefault(d['player'], []).append(d)
+    games_of = {p: sorted({d['game'] for d in ds}) for p, ds in by_player.items()}
+    if players is None:
+        players = [p for p in by_player if len(games_of[p]) >= min_games]
+        players = sorted(players, key=lambda p: -len(by_player[p]))[:4]
+    ALL = list(range(len(CHOICE_FEATURES)))
+    results = []
+    for p in players:
+        ds = by_player.get(p, [])
+        gs = games_of.get(p, [])
+        if len(gs) < min_games:
+            continue
+        others = [d for d in decisions if d['player'] != p]
+        r = {'player': p, 'decisions': len(ds), 'games': len(gs),
+             'chance': sum(1.0 / len(d['Z']) for d in ds) / len(ds)}
+        for label, cols, pool in (('eval_only', [0], ds), ('eval_style', ALL, ds), ('others', ALL, others)):
+            if not pool:
+                r[label] = None
+                continue
+            hits, ll = 0, 0.0
+            for g in gs:
+                w = _fit_choice_model([d for d in pool if d['game'] != g], cols)
+                h, l = _score_choice_model(w, [d for d in ds if d['game'] == g], cols)
+                hits += h
+                ll += l
+            r[label] = hits / len(ds)
+            r[label + '_ll'] = ll / len(ds)
+        r['weights'] = dict(zip(CHOICE_FEATURES, _fit_choice_model(ds, ALL)))
+        results.append(r)
+    return {'decisions': len(decisions), 'players': results}
+
+
+def heldout_tests_latex(analyses: List['EnhancedGameAnalysisResult'],
+                        regression_data: List[Dict],
+                        tracked_name: Optional[str] = None) -> List[str]:
+    """LaTeX for the held-out tests section of a book report."""
+    esc = EnhancedLaTeXReportGenerator._escape_latex
+    lines = [
+        r"\subsection{Held-out Tests of the Fireteam Index}",
+        r"",
+        r"Earlier versions of CGA printed ``empirically optimal'' FTI weights fitted to all of "
+        r"the games at once. Those weights and their $R^2$ values were not meaningful: the fit "
+        r"had no constant term and its weights were clipped and rescaled afterwards. This section "
+        r"instead tests the FTI the honest way: every prediction below is for a game the model "
+        r"was \emph{not} fitted on (leave-one-game-out), and it is compared with simple baselines.",
+        r"",
+        r"\paragraph{1. Predicting results.}",
+    ]
+    out = heldout_outcome_test(regression_data) if regression_data else None
+    if out is None:
+        lines.append(r"There are too few games with positional data for this test.")
+    elif out['all_same']:
+        res_name = {1.0: "a win", 0.5: "a draw", 0.0: "a loss"}[next(o for o, c in out['outcome_counts'].items() if c)]
+        lines.append(
+            rf"All {out['games']} games ended in {res_name} for the tracked side, so there is no "
+            r"variation in results for any weights to learn from, and the FTI cannot be tested "
+            r"as a predictor of results on this collection."
+        )
+    else:
+        n = out['games']
+        lines.extend([
+            r"For each game, FTI weights (with a constant term) were fitted to the other games and "
+            r"used to predict the held-out game's result (win, draw or loss).",
+            r"",
+            r"\begin{center}",
+            r"\begin{tabular}{lrr}",
+            r"\toprule",
+            r"\textbf{Method} & \textbf{Correct} & \textbf{Accuracy} \\",
+            r"\midrule",
+            rf"FTI with weights fitted to the other games & {out['fti_correct']}/{n} & {100*out['fti_correct']/n:.0f}\% \\",
+            rf"Always predict the most common result & {out['majority_correct']}/{n} & {100*out['majority_correct']/n:.0f}\% \\",
+        ])
+        if out['eval_available']:
+            lines.append(
+                rf"Streak rule on Stockfish's evaluation & {out['eval_correct']}/{n} & {100*out['eval_correct']/n:.0f}\% \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{tabular}", r"\end{center}", r""])
+        best_base = max(out['majority_correct'], out['eval_correct'] if out['eval_available'] else 0)
+        if out['fti_correct'] <= best_base:
+            lines.append(r"The fitted FTI does no better than a simple baseline, so on this collection "
+                         r"it adds no predictive value.")
+        else:
+            lines.append(r"The fitted FTI beats both baselines here, but with this few games the "
+                         r"difference may well be chance.")
+    lines.extend([
+        r"",
+        r"\paragraph{2. Predicting the type of move a player chooses.}",
+        r"In positions where Stockfish rates two or more moves within "
+        rf"{PLAYABLE_THRESHOLD} centipawns of its best, which one does the player pick? If Space, "
+        r"Mobility, King Safety and Threats captured a personal style, adding them to Stockfish's "
+        r"evaluation would predict the player's choices better, and a model fitted to the player's "
+        r"own moves would beat one fitted to the other players' moves.",
+        r"",
+    ])
+    players, merge = None, None
+    if tracked_name:
+        # Treat every spelling that matches the tracked name as one player
+        names = {m for a in analyses for m in (a.white, a.black)}
+        matched = [n for n in names if tracked_name.lower() in n.lower()]
+        if matched:
+            players, merge = [tracked_name], {n: tracked_name for n in matched}
+    mc = heldout_move_choice_test(analyses, players=players, merge_names=merge)
+    if not mc or not mc['players']:
+        lines.append(r"There are too few such positions, or too few games per player, for this test.")
+        return lines + [r""]
+    lines.extend([
+        r"\begin{center}",
+        r"\begin{tabular}{lrrrrr}",
+        r"\toprule",
+        r"\textbf{Player} & \textbf{Choices} & \textbf{Random} & \textbf{Eval only} & "
+        r"\textbf{Eval + metrics} & \textbf{Others' model} \\",
+        r"\midrule",
+    ])
+    def pct(v):
+        return "--" if v is None else f"{100*v:.0f}\\%"
+    for r in mc['players']:
+        lines.append(
+            rf"{esc(r['player'])} & {r['decisions']} & {pct(r['chance'])} & {pct(r['eval_only'])} & "
+            rf"{pct(r['eval_style'])} & {pct(r['others'])} \\"
+        )
+    lines.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\end{center}",
+        r"",
+        r"Each percentage is how often the model's most likely move was the move actually played, "
+        r"on games the model was not fitted on.",
+        r"",
+    ])
+    helped = [r for r in mc['players'] if r['eval_style_ll'] > r['eval_only_ll'] + 0.01]
+    distinct = [r for r in mc['players'] if r.get('others_ll') is not None
+                and r['eval_style_ll'] > r['others_ll'] + 0.01]
+    if not helped:
+        lines.append(r"Adding the four metrics does not improve the predictions for any player, "
+                     r"so on this collection they do not reveal a playing style.")
+    else:
+        lines.append(r"Adding the four metrics improves the predictions slightly for "
+                     + ", ".join(esc(r['player']) for r in helped) + ".")
+    if not distinct:
+        lines.append(r" No player's own model predicts their choices better than the model "
+                     r"fitted to the other players' moves.")
+    else:
+        lines.append(r" A player's own model beats the other players' model for "
+                     + ", ".join(esc(r['player']) for r in distinct)
+                     + r"; this can reflect playing strength (how often the engine's top move is "
+                       r"chosen) as well as style.")
+    lines.append(r"")
+    return lines
 
 
 def compute_fireteam_index_for_analysis(
