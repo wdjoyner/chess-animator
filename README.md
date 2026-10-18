@@ -53,6 +53,8 @@ pip install -r requirements.txt
 | `animator_initial_frame.py` | Initial frame scene and `GameInfo` dataclass. |
 | `animator_metrics.py` | Four-plot metrics strip (Eval, Space, Mobility, King Safety). |
 | `chess_game_analyzer.py` | **CGA (Chess Game Analyzer).** Stockfish wrapper that computes per-move positional metrics; also writes the LaTeX reports published in [QARC](https://github.com/wdjoyner/qarc). |
+| `chess_plotting.py` | Matplotlib (and ASCII) plots used by CGA's LaTeX reports. **Required for plots:** without it, CGA writes reports with no plots. |
+| `chess_animation.py` | Lightweight GIF/MP4 replay (board + four masked plots) made with matplotlib and Pillow, no Manim needed. Run on CGA's JSON: `python chess_animation.py analysis.json -o replay.gif` |
 | `convert_script_to_comment_dict.py` | Parses a `[KEY]` commentary text file into a dict. |
 | `manim_chess/` | Reference copy of the upstream manim-chess source. It is **not** imported (it has no `__init__.py`); the code uses the pip-installed `manim-chess` package. |
 
@@ -256,7 +258,7 @@ AnimatedGame.construct()
    Manim MP4 video      LaTeX/PDF book-length reports
 ```
 
-- **[QARC](https://github.com/wdjoyner/qarc)** (Quantitative-Analytic Reports on Chess) holds sample reports produced by CGA's LaTeX output (`python chess_game_analyzer.py games.pgn -o book.tex --book`) and the CGA manual.
+- **[QARC](https://github.com/wdjoyner/qarc)** (Quantitative-Analytic Reports on Chess) holds sample reports produced by CGA's LaTeX output and the CGA manual. To make a QARC-style book, keep `chess_plotting.py` next to `chess_game_analyzer.py`, install matplotlib, and run `python chess_game_analyzer.py games.pgn -o book.tex --book --stockfish /path/to/stockfish`. The plot PDFs are written next to `book.tex`; compile it with `pdflatex` twice.
 - This repository supersedes the older **[wdjoyner/chess](https://github.com/wdjoyner/chess)** repository, whose full commit history is included here.
 
 ---

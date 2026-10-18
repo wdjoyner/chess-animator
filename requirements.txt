@@ -12,6 +12,16 @@ manim-chess>=0.0.38   # PyPI package by swoyer2; latest release is 0.0.38
 # Chess logic and PGN/engine handling
 chess>=1.10.0
 
+# Plots in CGA's LaTeX/QARC reports (chess_plotting.py) and in chess_animation.py.
+# Without matplotlib, CGA silently produces reports with no plots.
+matplotlib>=3.5.0
+
+# GIF/MP4 replays (chess_animation.py)
+Pillow>=9.0.0
+# Optional extras for chess_animation.py:
+#   cairosvg          — nicer board rendering (pip install cairosvg)
+#   imageio[ffmpeg]   — MP4 output (pip install "imageio[ffmpeg]")
+
 # Standard library modules used (no install needed):
 #   argparse, dataclasses, io, json, math, os, pathlib,
 #   re, subprocess, sys, time, typing
